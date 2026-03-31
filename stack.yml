@@ -7,14 +7,15 @@ functions:
   echo-fn:
     lang: python3-http
     handler: ./functions/echo-fn
-    image: ${ACR_NAME}.azurecr.io/echo-fn:${IMAGE_TAG:-latest}
+    #image: ${ACR_NAME}.azurecr.io/echo-fn:${IMAGE_TAG:-latest}
+    image: Ragingsnake/figlet-fn:latest
     environment:
       WORK_MS: "10"
     labels:
       com.openfaas.scale.min: "1"
-      com.openfaas.scale.max: "20"
-      com.openfaas.scale.target: "10"
-      com.openfaas.scale.type: "rps"
+      com.openfaas.scale.max: "19"
+      #com.openfaas.scale.target: "10" premium feature..
+      #com.openfaas.scale.type: "rps" premium yeah
     limits:
       memory: 128Mi
       cpu: 100m
