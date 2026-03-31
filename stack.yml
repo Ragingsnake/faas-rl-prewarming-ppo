@@ -1,0 +1,23 @@
+version: 1.0
+provider:
+  name: openfaas
+  gateway: ${OPENFAAS_URL:-http://127.0.0.1:8080}
+
+functions:
+  echo-fn:
+    lang: python3-http
+    handler: ./functions/echo-fn
+    image: ${ACR_NAME}.azurecr.io/echo-fn:${IMAGE_TAG:-latest}
+    environment:
+      WORK_MS: "10"
+    labels:
+      com.openfaas.scale.min: "1"
+      com.openfaas.scale.max: "20"
+      com.openfaas.scale.target: "10"
+      com.openfaas.scale.type: "rps"
+    limits:
+      memory: 128Mi
+      cpu: 100m
+    requests:
+      memory: 64Mi
+      cpu: 50m

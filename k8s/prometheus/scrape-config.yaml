@@ -1,0 +1,39 @@
+---
+# Additional scrape configs for kube-prometheus-stack
+# Merged via Helm values: prometheus.additionalScrapeConfigs
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-additional-scrape
+  namespace: monitoring
+data:
+  scrape-configs.yaml: |
+    - job_name: openfaas-gateway
+      scrape_interval: 15s
+      static_configs:
+        - targets:
+            - gateway.openfaas:8080
+      metrics_path: /metrics
+
+    - job_name: rl-agent
+      scrape_interval: 15s
+      static_configs:
+        - targets:
+            - rl-agent.rl-system:8000
+      metrics_path: /metrics
+
+    - job_name: openfaas-functions
+      scrape_interval: 15s
+      kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+              - openfaas-fn
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: "true"
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)

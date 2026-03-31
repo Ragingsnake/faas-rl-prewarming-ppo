@@ -1,0 +1,134 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rl-system
+  labels:
+    app.kubernetes.io/managed-by: github-actions
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rl-agent
+  namespace: rl-system
+  labels:
+    app: rl-agent
+    version: "1.0"
+spec:
+  replicas: 1           # single controller — avoid competing actions
+  selector:
+    matchLabels:
+      app: rl-agent
+  template:
+    metadata:
+      labels:
+        app: rl-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8000"
+        prometheus.io/path:   "/metrics"
+    spec:
+      nodeSelector:
+        pool: user
+      containers:
+        - name: rl-agent
+          image: __ACR_NAME__.azurecr.io/rl-agent:__IMAGE_TAG__
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PROMETHEUS_URL
+              value: "http://prometheus-operated.monitoring:9090"
+            - name: OPENFAAS_URL
+              value: "http://gateway.openfaas:8080"
+            - name: OPENFAAS_USER
+              valueFrom:
+                secretKeyRef:
+                  name: basic-auth
+                  key: basic-auth-user
+            - name: OPENFAAS_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: basic-auth
+                  key: basic-auth-password
+            - name: FAAS_FUNCTION
+              value: "echo-fn"
+            - name: STEP_SECONDS
+              value: "15"
+            - name: CHECKPOINT_PATH
+              value: "/checkpoints/agent.pt"
+            - name: PRETRAIN_CKPT
+              value: "/checkpoints/pretrained.pt"
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /checkpoints
+          resources:
+            requests:
+              cpu:    "250m"
+              memory: "512Mi"
+            limits:
+              cpu:    "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: rl-checkpoints-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rl-checkpoints-pvc
+  namespace: rl-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: managed-csi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rl-agent
+  namespace: rl-system
+  labels:
+    app: rl-agent
+spec:
+  selector:
+    app: rl-agent
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
+---
+# ServiceMonitor so kube-prometheus-stack scrapes the agent
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rl-agent
+  namespace: rl-system
+  labels:
+    release: prometheus          # must match kube-prometheus-stack label selector
+spec:
+  selector:
+    matchLabels:
+      app: rl-agent
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
