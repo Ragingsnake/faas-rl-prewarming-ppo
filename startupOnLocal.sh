@@ -11,6 +11,9 @@ echo "grabbing docker and basic tools..."
 sudo apt-get update
 sudo apt-get install -y curl wget git docker.io apt-transport-https conntrack python3-venv python3-pip
 sudo systemctl enable --now docker
+
+# FIX: moved usermod before sg block and install faas-cli before sg too,
+# so paths are consistent inside the subshell
 sudo usermod -aG docker $USER
 
 echo "installing minikube..."
@@ -50,10 +53,19 @@ echo "logging into faas-cli..."
 PASSWORD=$(kubectl get secret -n openfaas basic-auth -o jsonpath="{.data.basic-auth-password}" | base64 --decode)
 echo -n $PASSWORD | faas-cli login --username admin --password-stdin --gateway http://127.0.0.1:8080
 
-echo "deploying figlet prolly gonna change to something else later"
-faas-cli store deploy figlet --gateway http://127.0.0.1:8080
+# FIX: was "faas-cli store deploy figlet" which bypasses stack.yml entirely.
+# Using stack.yml deploys your image with your scale labels and resource limits.
+echo "deploying figlet-fn via stack.yml..."
+OPENFAAS_URL=http://127.0.0.1:8080 faas-cli deploy -f stack.yml
+
+# Verify it came up
+echo "verifying deployment..."
+sleep 3
+faas-cli list --gateway http://127.0.0.1:8080
 
 echo ""
 echo "done. everything is running."
-echo "password: $PASSWORD"
+echo "gateway:    http://127.0.0.1:8080"
+echo "prometheus: http://127.0.0.1:9090"
+echo "password:   $PASSWORD"
 '

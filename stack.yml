@@ -8,7 +8,7 @@ functions:
     lang: python3-http
     handler: ./functions/echo-fn
     #image: ${ACR_NAME}.azurecr.io/echo-fn:${IMAGE_TAG:-latest}
-    image: Ragingsnake/figlet-fn:latest
+    image: ragingsnake/figlet-fn:latest
     environment:
       WORK_MS: "10"
     labels:
