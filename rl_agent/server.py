@@ -101,12 +101,15 @@ def _control_loop():
             continue
 
         # ── act ───────────────────────────────────────────────
-        action = _agent.select_action(state)
+        # FIX 1: unpack the tuple — select_action returns (action, log_prob, value)
+        action, log_prob, value = _agent.select_action(state)
         next_state, reward, done, info = _env.step(action)
 
         # ── learn ─────────────────────────────────────────────
-        _agent.store(state, action, reward, next_state, done)
-        loss = _agent.learn()
+        # FIX 2: PPO store signature is (state, action, log_prob, reward, value, done)
+        _agent.store(state, action, log_prob, reward, value, done)
+        # FIX 3: PPO learn() returns a dict, not a float; pass last value for GAE
+        losses = _agent.learn(last_value=value)
 
         state = next_state if not done else _env.reset()
 
@@ -115,10 +118,10 @@ def _control_loop():
             _stats["steps"]           += 1
             _stats["total_reward"]    += reward
             _stats["last_reward"]      = reward
-            _stats["last_loss"]        = loss or 0.0
+            _stats["last_loss"]        = losses.get("actor_loss", 0.0)
             _stats["warm_containers"]  = info.get("warm_containers", 0)
             _stats["last_cold_starts"] = info.get("cold_starts", 0)
-            # PPO: entropy tracked via learn() losses
+            _stats["entropy"]          = losses.get("entropy", 0.0)
 
         # ── periodic checkpoint ───────────────────────────────
         if _stats["steps"] % 20 == 0:

@@ -4,16 +4,16 @@ provider:
   gateway: ${OPENFAAS_URL:-http://127.0.0.1:8080}
 
 functions:
-  echo-fn:
-    lang: python3-http
-    handler: ./functions/echo-fn
+  figlet-fn:
+    #lang: python3-http
+    #handler: ./functions/echo-fn
     #image: ${ACR_NAME}.azurecr.io/echo-fn:${IMAGE_TAG:-latest}
     image: ragingsnake/figlet-fn:latest
     environment:
       WORK_MS: "10"
     labels:
       com.openfaas.scale.min: "1"
-      com.openfaas.scale.max: "19"
+      com.openfaas.scale.max: "5"
       #com.openfaas.scale.target: "10" premium feature..
       #com.openfaas.scale.type: "rps" premium yeah
     limits:

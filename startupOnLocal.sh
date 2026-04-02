@@ -56,7 +56,8 @@ echo -n $PASSWORD | faas-cli login --username admin --password-stdin --gateway h
 # FIX: was "faas-cli store deploy figlet" which bypasses stack.yml entirely.
 # Using stack.yml deploys your image with your scale labels and resource limits.
 echo "deploying figlet-fn via stack.yml..."
-OPENFAAS_URL=http://127.0.0.1:8080 faas-cli deploy -f stack.yml
+OPENFAAS_URL=http://127.0.0.1:8080
+faas-cli deploy -f stack.yml
 
 # Verify it came up
 echo "verifying deployment..."
