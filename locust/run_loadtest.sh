@@ -28,7 +28,7 @@ echo "starting headless load test for 19 minutes..."
 # FIX: --headless requires --users and --spawn-rate
 # These are the max caps; the LoadTestShape in locustfile-local.py
 # controls the actual ramp profile within these limits
-locust -f locustfile-local.py \
+locust -f locustfile.py \
     --host http://127.0.0.1:8080 \
     --headless \
     --users 200 \
