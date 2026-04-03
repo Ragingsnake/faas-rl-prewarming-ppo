@@ -17,7 +17,7 @@ pip install locust --quiet
 export OPENFAAS_USER=admin
 export OPENFAAS_PASS=$(kubectl get secret -n openfaas basic-auth \
     -o jsonpath="{.data.basic-auth-password}" | base64 --decode)
-export FAAS_FUNCTION=echo-fn    # must match stack.yml function name
+export FAAS_FUNCTION=figlet-fn    # must match stack.yml function name
 
 echo "OPENFAAS_USER: $OPENFAAS_USER"
 echo "FAAS_FUNCTION: $FAAS_FUNCTION"

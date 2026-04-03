@@ -26,7 +26,7 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from ppo_agent import PPOAgent
+from ppo_agent import PPOAgent, ROLLOUT_STEPS
 from environment import EnvConfig, FaaSEnv
 
 # ──────────────────────────────────────────────────────────────
@@ -91,6 +91,7 @@ def _control_loop():
         log.info("Resumed from existing checkpoint %s", CKPT_PATH)
 
     state = _env.reset()
+    last_losses: dict = {}
 
     while True:
         with _lock:
@@ -101,30 +102,42 @@ def _control_loop():
             continue
 
         # ── act ───────────────────────────────────────────────
-        # FIX 1: unpack the tuple — select_action returns (action, log_prob, value)
         action, log_prob, value = _agent.select_action(state)
         next_state, reward, done, info = _env.step(action)
 
-        # ── learn ─────────────────────────────────────────────
-        # FIX 2: PPO store signature is (state, action, log_prob, reward, value, done)
+        # ── store ─────────────────────────────────────────────
         _agent.store(state, action, log_prob, reward, value, done)
-        # FIX 3: PPO learn() returns a dict, not a float; pass last value for GAE
-        losses = _agent.learn(last_value=value)
 
         state = next_state if not done else _env.reset()
+
+        # ── learn — only when rollout buffer is full ───────────
+        # PPO must accumulate ROLLOUT_STEPS transitions before updating.
+        # Calling learn() with 1 sample causes std()=0 on the single-element
+        # advantages tensor → degenerate gradients → NaN weights → crash.
+        if len(_agent.buffer) >= ROLLOUT_STEPS:
+            # Bootstrap V(s) for the final non-terminal state
+            if not done:
+                import torch as _torch
+                with _torch.no_grad():
+                    s_t = _torch.tensor(state, dtype=_torch.float32).unsqueeze(0)
+                    _, last_val = _agent.policy(s_t)
+                    bootstrap = last_val.item()
+            else:
+                bootstrap = 0.0
+            last_losses = _agent.learn(last_value=bootstrap)
 
         # ── update stats ──────────────────────────────────────
         with _lock:
             _stats["steps"]           += 1
             _stats["total_reward"]    += reward
             _stats["last_reward"]      = reward
-            _stats["last_loss"]        = losses.get("actor_loss", 0.0)
+            _stats["last_loss"]        = last_losses.get("actor_loss", 0.0)
             _stats["warm_containers"]  = info.get("warm_containers", 0)
             _stats["last_cold_starts"] = info.get("cold_starts", 0)
-            _stats["entropy"]          = losses.get("entropy", 0.0)
+            _stats["entropy"]          = last_losses.get("entropy", 0.0)
 
-        # ── periodic checkpoint ───────────────────────────────
-        if _stats["steps"] % 20 == 0:
+        # ── periodic checkpoint (only after at least one update) ──
+        if _stats["steps"] % 20 == 0 and last_losses:
             Path(CKPT_PATH).parent.mkdir(parents=True, exist_ok=True)
             _agent.save(CKPT_PATH)
 
