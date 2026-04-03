@@ -13,8 +13,8 @@ functions:
       WORK_MS: "10"
     labels:
       com.openfaas.scale.factor: "0"
-      #com.openfaas.scale.min: "1"
-      #com.openfaas.scale.max: "5"
+      com.openfaas.scale.min: "1"
+      com.openfaas.scale.max: "1"
       #com.openfaas.scale.target: "10" premium feature..
       #com.openfaas.scale.type: "rps" premium yeah
     limits:

@@ -13,7 +13,7 @@ export PROMETHEUS_URL=http://127.0.0.1:9090
 export OPENFAAS_URL=http://127.0.0.1:8080
 export OPENFAAS_USER=admin
 export OPENFAAS_PASS=$OPENFAAS_PASS
-export FAAS_FUNCTION=echo-fn        # must match the name in stack.yml
+export FAAS_FUNCTION=figlet-fn        # must match the name in stack.yml
 export STEP_SECONDS=15
 
 # ── checkpoint paths — both relative to rl_agent/ ─────────────
