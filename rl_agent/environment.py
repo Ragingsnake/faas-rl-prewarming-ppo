@@ -27,7 +27,7 @@ import requests
 
 log = logging.getLogger(__name__)
 
-MAX_WARM   = 20
+MAX_WARM   = 5
 MIN_WARM   = 0
 STEP_SLEEP = 15
 ACTION_MAP = [-2, -1, 0, 1, 2]
