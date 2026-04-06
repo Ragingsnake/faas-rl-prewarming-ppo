@@ -27,8 +27,8 @@ import requests
 
 log = logging.getLogger(__name__)
 
-MAX_WARM   = 5
-MIN_WARM   = 0
+MAX_WARM   = 5    # CE hard cap — keeps action space and state range realistic
+MIN_WARM   = 1    # CE minimum is 1 — never evict last container
 STEP_SLEEP = 15
 ACTION_MAP = [-2, -1, 0, 1, 2]
 
@@ -77,25 +77,33 @@ class FaaSEnv:
         now = datetime.utcnow()
         h, d = now.hour + now.minute/60, now.weekday()
         return np.array([
-            np.clip(rr/500,0,1), np.clip(rdelta/100,-1,1),
+            np.clip(rr/100,0,1), np.clip(rdelta/100,-1,1),  # /100: realistic CE max ~75 RPS
             math.sin(2*math.pi*h/24), math.cos(2*math.pi*h/24),
             math.sin(2*math.pi*d/7),  math.cos(2*math.pi*d/7),
             self._current_warm/MAX_WARM, csr, np.clip(q/50,0,1),
         ], dtype=np.float32)
 
     def _reward(self, m: dict) -> float:
-        cold_penalty = -5.0 * m["cold"]
-        # FIX 5b: idle penalty scales with actual idle count, not capped at 1.
-        # Also a hard zero-traffic penalty: if rr ~ 0 and we have >1 container,
-        # charge proportionally so the agent learns to scale down when idle.
-        idle = m["idle"]
-        if m["rr"] < 1.0:
-            # zero-traffic: full idle penalty per container above minimum
-            idle_penalty = -0.5 * max(0, m["reps"] - 1)
+        # REWRITE: reward is now rate-based (not count-based) so it's bounded
+        # regardless of traffic volume. Before: range was [-276k, +3k] which
+        # caused critic MSE loss in the millions → divergence → actor frozen.
+        # Now: range is [-6, +1] per step, critic can actually learn.
+        total_reqs = m["cold"] + m["warm"]
+        if total_reqs > 0:
+            cold_rate = m["cold"] / total_reqs        # [0, 1]
+            # quality: -5 if all cold, +1 if all warm
+            quality = -5.0 * cold_rate + 1.0 * (1.0 - cold_rate)
         else:
-            idle_penalty = -0.2 * max(0, idle - 1)
-        warm_bonus = 2.0 * m["warm"] * 0.05
-        return cold_penalty + idle_penalty + warm_bonus
+            quality = 0.0
+
+        # Idle cost: per excess container above what's actually needed
+        if m["rr"] < 1.0:
+            idle_penalty = -1.0 * max(0, m["reps"] - 1)   # [-4, 0] for CE max 5
+        else:
+            needed = max(1, math.ceil(m["rr"] / 15.0))
+            idle_penalty = -0.3 * max(0, m["reps"] - needed - 1)
+
+        return quality + idle_penalty
 
     def _scrape(self):
         fn, dur = self.cfg.function_name, self.cfg.step_seconds
@@ -146,7 +154,7 @@ class SyntheticFaaSEnv:
         self._prev_rr = 0.0
 
     def reset(self, seed=None, options=None):
-        self._t, self._warm, self._prev_rr = 0, 2, 0.0
+        self._t, self._warm, self._prev_rr = 0, MIN_WARM, 0.0
         return self._obs(), {}
 
     def step(self, action_idx):
@@ -154,12 +162,20 @@ class SyntheticFaaSEnv:
         self._t   += 1
         rr = self._rr()
         m  = self._sim(rr)
-        # FIX 6: match the real env reward — stronger idle penalty at zero traffic
-        if rr < 1.0:
-            idle_penalty = -0.5 * max(0, self._warm - 1)
+        # Rate-based reward: identical formula to FaaSEnv._reward()
+        # so the synthetic agent learns the same objective as the online agent.
+        total_reqs = m["cold_starts"] + m["warm_hits"]
+        if total_reqs > 0:
+            cold_rate = m["cold_starts"] / total_reqs
+            quality   = -5.0 * cold_rate + 1.0 * (1.0 - cold_rate)
         else:
-            idle_penalty = -0.2 * max(0, m["idle_warm"] - 1)
-        r = -5.0*m["cold_starts"] + idle_penalty + 2.0*m["warm_hits"]*0.05
+            quality = 0.0
+        if rr < 1.0:
+            idle_penalty = -1.0 * max(0, self._warm - 1)
+        else:
+            needed = max(1, math.ceil(rr / 15.0))
+            idle_penalty = -0.3 * max(0, self._warm - needed - 1)
+        r = quality + idle_penalty
         done = self._t >= 1440
         return self._obs(rr,m), r, done, False, m
 
@@ -168,10 +184,12 @@ class SyntheticFaaSEnv:
         if   self.pattern=="daily":  base = 50*math.exp(-0.5*((h-12)/3)**2)+5
         elif self.pattern=="spike":  base = 10+(200 if 360<=t<380 else 0)
         elif self.pattern=="jitter": base = 20+30*abs(math.sin(t/15))
-        # FIX 6: "zero" pattern — near-zero traffic, teaches agent to scale down
-        elif self.pattern=="zero":   base = float(self.rng.uniform(0, 2))
+        # FIX 6: "zero" pattern — truly zero traffic so agent learns exact
+        # online state (rr=0). uniform(0,2) was giving quality=+1 at 1 RPS
+        # with any containers → no incentive to scale down.
+        elif self.pattern=="zero":   base = 0.0
         else:                        base = 30.0
-        noise_scale = base*0.05 if base > 1 else 0.1
+        noise_scale = base * 0.05 if base > 0 else 0.0
         return max(0.0, base + float(self.rng.normal(0, noise_scale)))
 
     def _sim(self, rr):
@@ -195,7 +213,7 @@ class SyntheticFaaSEnv:
         # FIX: state already normalized — no /100 needed here
         delta, self._prev_rr = np.clip((rr-self._prev_rr)/100,-1,1), rr
         return np.array([
-            np.clip(rr/500,0,1), delta,
+            np.clip(rr/100,0,1), delta,  # /100 matches FaaSEnv._state()
             math.sin(2*math.pi*h/24), math.cos(2*math.pi*h/24),
             math.sin(2*math.pi*d/7),  math.cos(2*math.pi*d/7),
             self._warm/MAX_WARM, m["cold_start_ratio"], np.clip(m["queue"]/50,0,1),
