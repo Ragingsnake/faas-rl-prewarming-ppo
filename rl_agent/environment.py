@@ -66,7 +66,10 @@ class FaaSEnv:
         # _current_warm is now the ground-truth count from OpenFaaS,
         # so state and /status always match `faas-cli list`.
         self._current_warm = m["reps"]
-        r = self._reward(m)
+
+        action_penalty = -0.1 if delta != 0 else 0.0
+        r = self._reward(m) + action_penalty
+
         return self._state(m["rr"], m["rdelta"], m["csr"], m["q"]), r, False, {
             "warm_containers": self._current_warm,
             "cold_starts": m["cold"], "warm_hits": m["warm"],
@@ -175,7 +178,10 @@ class SyntheticFaaSEnv:
         else:
             needed = max(1, math.ceil(rr / 15.0))
             idle_penalty = -0.3 * max(0, self._warm - needed - 1)
-        r = quality + idle_penalty
+
+        action_penalty = -0.1 if ACTION_MAP[action_idx] != 0 else 0.0
+        r = quality + idle_penalty + action_penalty
+        
         done = self._t >= 1440
         return self._obs(rr,m), r, done, False, m
 

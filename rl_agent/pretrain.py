@@ -58,7 +58,7 @@ def pretrain(epochs, out_path, seed):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--epochs", type=int, default=40)
+    ap.add_argument("--epochs", type=int, default=500)
     ap.add_argument("--out",    default="checkpoints/pretrained.pt")
     ap.add_argument("--seed",   type=int, default=42)
     args = ap.parse_args()
