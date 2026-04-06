@@ -13,7 +13,8 @@ from environment import SyntheticFaaSEnv
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(message)s")
 log = logging.getLogger(__name__)
-PATTERNS = ["daily", "spike", "jitter", "flat"]
+# FIX 6: added "zero" so the agent learns to scale down at zero traffic
+PATTERNS = ["daily", "spike", "jitter", "flat", "zero"]
 
 
 def run_episode(agent, env):

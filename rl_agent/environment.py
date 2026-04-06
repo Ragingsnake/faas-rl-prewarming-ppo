@@ -8,6 +8,15 @@ Bugs fixed vs the uploaded notebook's ServerlessEnv:
   2. alpha1-4 and cmem defined but never used -> removed
   3. mem was always 0.2 (never updated) -> now tracks idle container memory
   4. latency = total_requests (bad proxy) -> queue-weighted latency
+
+Bugs fixed in this revision:
+  5. _current_warm was set to requested replicas, not actual replicas from
+     OpenFaaS CE. CE caps at 5; if agent asked for 7, _current_warm=7 but
+     reality was 5. State vector was wrong, /status lied, agent kept pushing
+     +2 thinking commands weren't landing. Fixed: read actual replicas back
+     after every sleep and update _current_warm from that truth.
+  6. SyntheticFaaSEnv had no zero-traffic pattern. Agent never learned
+     "scale down when idle". Added "zero" pattern (rr ~ 0-2 RPS).
 """
 from __future__ import annotations
 import logging, math, time
@@ -49,10 +58,15 @@ class FaaSEnv:
         delta = ACTION_MAP[action_idx]
         target = int(np.clip(self._current_warm + delta, MIN_WARM, MAX_WARM))
         self._set_replicas(target)
-        self._current_warm = target
+        # FIX 5: do NOT set _current_warm = target here.
+        # CE may cap the replica count below what we requested.
+        # We read the actual value back from the API after sleeping.
         time.sleep(self.cfg.step_seconds)
         m = self._scrape()
-        r = -5.0*m["cold"] - 0.2*max(0,m["idle"]-1) + 2.0*m["warm"]*0.05
+        # _current_warm is now the ground-truth count from OpenFaaS,
+        # so state and /status always match `faas-cli list`.
+        self._current_warm = m["reps"]
+        r = self._reward(m)
         return self._state(m["rr"], m["rdelta"], m["csr"], m["q"]), r, False, {
             "warm_containers": self._current_warm,
             "cold_starts": m["cold"], "warm_hits": m["warm"],
@@ -69,18 +83,34 @@ class FaaSEnv:
             self._current_warm/MAX_WARM, csr, np.clip(q/50,0,1),
         ], dtype=np.float32)
 
+    def _reward(self, m: dict) -> float:
+        cold_penalty = -5.0 * m["cold"]
+        # FIX 5b: idle penalty scales with actual idle count, not capped at 1.
+        # Also a hard zero-traffic penalty: if rr ~ 0 and we have >1 container,
+        # charge proportionally so the agent learns to scale down when idle.
+        idle = m["idle"]
+        if m["rr"] < 1.0:
+            # zero-traffic: full idle penalty per container above minimum
+            idle_penalty = -0.5 * max(0, m["reps"] - 1)
+        else:
+            idle_penalty = -0.2 * max(0, idle - 1)
+        warm_bonus = 2.0 * m["warm"] * 0.05
+        return cold_penalty + idle_penalty + warm_bonus
+
     def _scrape(self):
         fn, dur = self.cfg.function_name, self.cfg.step_seconds
         rr  = self._prom(f'rate(gateway_function_invocation_total{{function_name="{fn}"}}[{dur}s])')
         ct  = int(self._prom(f'gateway_function_invocation_total{{function_name="{fn}",code="cold"}}'))
         wt  = int(self._prom(f'gateway_function_invocation_total{{function_name="{fn}",code="warm"}}'))
         q   = self._prom(f'gateway_service_queue_depth{{function_name="{fn}"}}')
+        # FIX 5: reps is returned so step() can sync _current_warm to ground truth
         reps = self._get_replicas()
         cold = max(0,ct-self._prev_cold);  self._prev_cold=ct
         warm = max(0,wt-self._prev_warm);  self._prev_warm=wt
         rd   = rr - self._prev_req_rate;   self._prev_req_rate=rr
         idle = max(0, reps - max(1,int(rr/15)))
-        return dict(rr=rr,rdelta=rd,cold=cold,warm=warm,csr=cold/max(1,cold+warm),q=q,idle=idle)
+        return dict(rr=rr,rdelta=rd,cold=cold,warm=warm,
+                    csr=cold/max(1,cold+warm),q=q,idle=idle,reps=reps)
 
     def _prom(self, query, default=0.0):
         try:
@@ -124,7 +154,12 @@ class SyntheticFaaSEnv:
         self._t   += 1
         rr = self._rr()
         m  = self._sim(rr)
-        r  = -5.0*m["cold_starts"] - 0.2*max(0,m["idle_warm"]-1) + 2.0*m["warm_hits"]*0.05
+        # FIX 6: match the real env reward — stronger idle penalty at zero traffic
+        if rr < 1.0:
+            idle_penalty = -0.5 * max(0, self._warm - 1)
+        else:
+            idle_penalty = -0.2 * max(0, m["idle_warm"] - 1)
+        r = -5.0*m["cold_starts"] + idle_penalty + 2.0*m["warm_hits"]*0.05
         done = self._t >= 1440
         return self._obs(rr,m), r, done, False, m
 
@@ -133,8 +168,11 @@ class SyntheticFaaSEnv:
         if   self.pattern=="daily":  base = 50*math.exp(-0.5*((h-12)/3)**2)+5
         elif self.pattern=="spike":  base = 10+(200 if 360<=t<380 else 0)
         elif self.pattern=="jitter": base = 20+30*abs(math.sin(t/15))
+        # FIX 6: "zero" pattern — near-zero traffic, teaches agent to scale down
+        elif self.pattern=="zero":   base = float(self.rng.uniform(0, 2))
         else:                        base = 30.0
-        return max(0.0, base + float(self.rng.normal(0, base*0.05)))
+        noise_scale = base*0.05 if base > 1 else 0.1
+        return max(0.0, base + float(self.rng.normal(0, noise_scale)))
 
     def _sim(self, rr):
         surp = self._warm*15 - rr

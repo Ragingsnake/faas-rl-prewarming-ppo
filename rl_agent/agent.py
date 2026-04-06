@@ -1,5 +1,5 @@
 """
-DQN Agent for FaaS Pre-warming.
+PPO Agent for FaaS Pre-warming.
 
 State  (9-dim):
   [req_rate, req_rate_delta, hour_sin, hour_cos,
