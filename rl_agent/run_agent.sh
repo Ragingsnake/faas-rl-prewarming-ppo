@@ -32,7 +32,7 @@ pip install -r requirements.txt
 
 echo "running pretraining..."
 mkdir -p checkpoints
-python3 pretrain.py --epochs 40 --out $PRETRAIN_CKPT
+python3 pretrain.py --epochs 500 --out $PRETRAIN_CKPT
 
 # FIX: was python3 main.py — main.py doesn't exist, entrypoint is server.py
 echo "launching the ppo agent server on :9000..."
