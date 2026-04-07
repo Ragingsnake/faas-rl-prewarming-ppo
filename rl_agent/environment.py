@@ -56,7 +56,8 @@ class FaaSEnv:
 
     def step(self, action_idx: int):
         delta = ACTION_MAP[action_idx]
-        target = int(np.clip(self._current_warm + delta, MIN_WARM, MAX_WARM))
+        requested = self._current_warm + delta
+        target = int(np.clip(requested, MIN_WARM, MAX_WARM))
         self._set_replicas(target)
         # FIX 5: do NOT set _current_warm = target here.
         # CE may cap the replica count below what we requested.
@@ -67,13 +68,21 @@ class FaaSEnv:
         # so state and /status always match `faas-cli list`.
         self._current_warm = m["reps"]
 
-        action_penalty = -0.1 if delta != 0 else 0.0
+        # No action penalty when scaling down at zero traffic — encourages aggressive scale-down
+        action_penalty = -0.1 if (delta != 0 and m["rr"] > 1.0) else 0.0
+        
+        # FIX 7: Penalize impossible actions (asking to scale beyond bounds)
+        # Agent should learn that +1/+2 at MAX_WARM or -1/-2 at MIN_WARM is wasteful
+        if requested > MAX_WARM or requested < MIN_WARM:
+            action_penalty -= 0.3  # extra penalty for invalid action
+        
         r = self._reward(m) + action_penalty
 
         return self._state(m["rr"], m["rdelta"], m["csr"], m["q"]), r, False, {
             "warm_containers": self._current_warm,
             "cold_starts": m["cold"], "warm_hits": m["warm"],
             "req_rate": m["rr"], "reward": r,
+            "queue": m["q"]
         }
 
     def _state(self, rr, rdelta, csr, q):
@@ -104,24 +113,57 @@ class FaaSEnv:
             idle_penalty = -1.0 * max(0, m["reps"] - 1)   # [-4, 0] for CE max 5
         else:
             needed = max(1, math.ceil(m["rr"] / 15.0))
-            idle_penalty = -0.3 * max(0, m["reps"] - needed - 1)
+            # FIX 8: Remove the -1 slack — penalize every excess container
+            idle_penalty = -0.3 * max(0, m["reps"] - needed)
 
         return quality + idle_penalty
 
     def _scrape(self):
-        fn, dur = self.cfg.function_name, self.cfg.step_seconds
-        rr  = self._prom(f'rate(gateway_function_invocation_total{{function_name="{fn}"}}[{dur}s])')
-        ct  = int(self._prom(f'gateway_function_invocation_total{{function_name="{fn}",code="cold"}}'))
-        wt  = int(self._prom(f'gateway_function_invocation_total{{function_name="{fn}",code="warm"}}'))
-        q   = self._prom(f'gateway_service_queue_depth{{function_name="{fn}"}}')
-        # FIX 5: reps is returned so step() can sync _current_warm to ground truth
+        # 1. Prometheus requires the namespace suffix in OpenFaaS CE!
+        prom_fn = f"{self.cfg.function_name}.openfaas-fn"
+        dur = self.cfg.step_seconds
+        
+        # Query Prometheus using the fully qualified name (No fake queue metric!)
+        rr = self._prom(f'rate(gateway_function_invocation_total{{function_name="{prom_fn}"}}[{dur}s])')
+        
+        # The OpenFaaS API still expects just the base name
         reps = self._get_replicas()
-        cold = max(0,ct-self._prev_cold);  self._prev_cold=ct
-        warm = max(0,wt-self._prev_warm);  self._prev_warm=wt
-        rd   = rr - self._prev_req_rate;   self._prev_req_rate=rr
-        idle = max(0, reps - max(1,int(rr/15)))
-        return dict(rr=rr,rdelta=rd,cold=cold,warm=warm,
-                    csr=cold/max(1,cold+warm),q=q,idle=idle,reps=reps)
+
+        # 2. Mathematical Cold/Warm/Queue Estimation
+        # 1 replica handles ~15 RPS smoothly. Overflow is penalized.
+        capacity = max(1, reps) * 15.0
+        
+        if rr > capacity:
+            cold_estimate = rr - capacity
+            warm_estimate = capacity
+            q_estimate = rr - capacity  # The overflow IS the backlog queue
+        else:
+            cold_estimate = 0.0
+            warm_estimate = rr
+            q_estimate = 0.0            # No overflow, no queue
+
+        # 3. Calculate deltas
+        rd = rr - self._prev_req_rate
+        self._prev_req_rate = rr
+        idle = max(0, reps - max(1, int(rr/15)))
+
+        return dict(rr=rr, rdelta=rd, cold=cold_estimate, warm=warm_estimate,
+                    csr=cold_estimate/max(1, rr), q=q_estimate, idle=idle, reps=reps)
+
+    # def _scrape(self):
+    #     fn, dur = self.cfg.function_name, self.cfg.step_seconds
+    #     rr  = self._prom(f'rate(gateway_function_invocation_total{{function_name="{fn}"}}[{dur}s])')
+    #     ct  = int(self._prom(f'gateway_function_invocation_total{{function_name="{fn}",code="cold"}}'))
+    #     wt  = int(self._prom(f'gateway_function_invocation_total{{function_name="{fn}",code="warm"}}'))
+    #     q   = self._prom(f'gateway_service_queue_depth{{function_name="{fn}"}}')
+    #     # FIX 5: reps is returned so step() can sync _current_warm to ground truth
+    #     reps = self._get_replicas()
+    #     cold = max(0,ct-self._prev_cold);  self._prev_cold=ct
+    #     warm = max(0,wt-self._prev_warm);  self._prev_warm=wt
+    #     rd   = rr - self._prev_req_rate;   self._prev_req_rate=rr
+    #     idle = max(0, reps - max(1,int(rr/15)))
+    #     return dict(rr=rr,rdelta=rd,cold=cold,warm=warm,
+    #                 csr=cold/max(1,cold+warm),q=q,idle=idle,reps=reps)
 
     def _prom(self, query, default=0.0):
         try:
@@ -161,7 +203,9 @@ class SyntheticFaaSEnv:
         return self._obs(), {}
 
     def step(self, action_idx):
-        self._warm = int(np.clip(self._warm + ACTION_MAP[action_idx], MIN_WARM, MAX_WARM))
+        delta = ACTION_MAP[action_idx]
+        requested = self._warm + delta
+        self._warm = int(np.clip(requested, MIN_WARM, MAX_WARM))
         self._t   += 1
         rr = self._rr()
         m  = self._sim(rr)
@@ -177,9 +221,16 @@ class SyntheticFaaSEnv:
             idle_penalty = -1.0 * max(0, self._warm - 1)
         else:
             needed = max(1, math.ceil(rr / 15.0))
-            idle_penalty = -0.3 * max(0, self._warm - needed - 1)
+            # FIX 8: Remove the -1 slack — penalize every excess container
+            idle_penalty = -0.3 * max(0, self._warm - needed)
 
-        action_penalty = -0.1 if ACTION_MAP[action_idx] != 0 else 0.0
+        # No action penalty when scaling down at zero traffic — encourages aggressive scale-down
+        action_penalty = -0.1 if (delta != 0 and rr > 1.0) else 0.0
+        
+        # FIX 7: Penalize impossible actions (asking to scale beyond bounds)
+        if requested > MAX_WARM or requested < MIN_WARM:
+            action_penalty -= 0.3
+        
         r = quality + idle_penalty + action_penalty
         
         done = self._t >= 1440

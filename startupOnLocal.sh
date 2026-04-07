@@ -65,6 +65,14 @@ sleep 3
 faas-cli list --gateway http://127.0.0.1:8080
 
 echo ""
+echo "cleaning up alertmanager pods (if any)..."
+if kubectl -n openfaas get pods -l app=alertmanager --no-headers >/dev/null 2>&1; then
+  kubectl -n openfaas delete pods -l app=alertmanager || true
+  echo "alertmanager pods deleted."
+else
+  echo "no alertmanager pods found."
+fi
+
 echo "done. everything is running."
 echo "gateway:    http://127.0.0.1:8080"
 echo "prometheus: http://127.0.0.1:9090"

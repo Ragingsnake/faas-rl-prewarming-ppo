@@ -103,8 +103,12 @@ def _control_loop():
 
         # ── act ───────────────────────────────────────────────
         action, log_prob, value = _agent.select_action(state)
+        delta = _agent.action_delta(action)
+        log.info(f"Step {_stats['steps']}: Agent chose Action {action} (Delta: {delta} containers)")
+        
         next_state, reward, done, info = _env.step(action)
-
+        
+        log.info(f"Result -> Reps: {info.get('warm_containers')}, Traffic: {info.get('req_rate'):.1f} RPS, Queue: {info.get('queue', 0):.1f}, Reward: {reward:.2f}")        
         # ── store ─────────────────────────────────────────────
         _agent.store(state, action, log_prob, reward, value, done)
 
