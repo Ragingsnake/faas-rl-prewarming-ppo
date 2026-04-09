@@ -68,6 +68,7 @@ echo ""
 echo "cleaning up alertmanager pods (if any)..."
 if kubectl -n openfaas get pods -l app=alertmanager --no-headers >/dev/null 2>&1; then
   kubectl -n openfaas delete pods -l app=alertmanager || true
+  kubectl scale deploy/alertmanager -n openfaas --replicas=0
   echo "alertmanager pods deleted."
 else
   echo "no alertmanager pods found."

@@ -31,6 +31,9 @@ MAX_WARM   = 5    # CE hard cap — keeps action space and state range realistic
 MIN_WARM   = 1    # CE minimum is 1 — never evict last container
 STEP_SLEEP = 15
 ACTION_MAP = [-2, -1, 0, 1, 2]
+PER_REPLICA_RPS = 15.0
+SCALE_UP_UTIL = 0.90
+SCALE_DOWN_UTIL = 0.80
 
 
 @dataclass
@@ -55,7 +58,8 @@ class FaaSEnv:
         return self._state(0, 0, 0, 0)
 
     def step(self, action_idx: int):
-        delta = ACTION_MAP[action_idx]
+        raw_delta = ACTION_MAP[action_idx]
+        delta = self._stabilize_delta(raw_delta, self._prev_req_rate, self._current_warm)
         requested = self._current_warm + delta
         target = int(np.clip(requested, MIN_WARM, MAX_WARM))
         self._set_replicas(target)
@@ -82,8 +86,19 @@ class FaaSEnv:
             "warm_containers": self._current_warm,
             "cold_starts": m["cold"], "warm_hits": m["warm"],
             "req_rate": m["rr"], "reward": r,
-            "queue": m["q"]
+            "queue": m["q"],
+            "raw_delta": raw_delta,
+            "applied_delta": delta,
         }
+
+    def _stabilize_delta(self, delta: int, rr: float, reps: int) -> int:
+        if delta == 0:
+            return 0
+        if delta > 0:
+            up_threshold = reps * PER_REPLICA_RPS * SCALE_UP_UTIL
+            return delta if rr > up_threshold else 0
+        down_threshold = max(1, reps - 1) * PER_REPLICA_RPS * SCALE_DOWN_UTIL
+        return delta if rr < down_threshold else 0
 
     def _state(self, rr, rdelta, csr, q):
         now = datetime.utcnow()
@@ -112,7 +127,7 @@ class FaaSEnv:
         if m["rr"] < 1.0:
             idle_penalty = -1.0 * max(0, m["reps"] - 1)   # [-4, 0] for CE max 5
         else:
-            needed = max(1, math.ceil(m["rr"] / 15.0))
+            needed = max(1, math.ceil(m["rr"] / PER_REPLICA_RPS))
             # FIX 8: Remove the -1 slack — penalize every excess container
             idle_penalty = -0.3 * max(0, m["reps"] - needed)
 
@@ -130,8 +145,8 @@ class FaaSEnv:
         reps = self._get_replicas()
 
         # 2. Mathematical Cold/Warm/Queue Estimation
-        # 1 replica handles ~15 RPS smoothly. Overflow is penalized.
-        capacity = max(1, reps) * 15.0
+        # 1 replica handles ~PER_REPLICA_RPS smoothly. Overflow is penalized.
+        capacity = max(1, reps) * PER_REPLICA_RPS
         
         if rr > capacity:
             cold_estimate = rr - capacity
@@ -145,7 +160,7 @@ class FaaSEnv:
         # 3. Calculate deltas
         rd = rr - self._prev_req_rate
         self._prev_req_rate = rr
-        idle = max(0, reps - max(1, int(rr/15)))
+        idle = max(0, reps - max(1, int(rr / PER_REPLICA_RPS)))
 
         return dict(rr=rr, rdelta=rd, cold=cold_estimate, warm=warm_estimate,
                     csr=cold_estimate/max(1, rr), q=q_estimate, idle=idle, reps=reps)
@@ -203,7 +218,8 @@ class SyntheticFaaSEnv:
         return self._obs(), {}
 
     def step(self, action_idx):
-        delta = ACTION_MAP[action_idx]
+        raw_delta = ACTION_MAP[action_idx]
+        delta = self._stabilize_delta(raw_delta, self._prev_rr, self._warm)
         requested = self._warm + delta
         self._warm = int(np.clip(requested, MIN_WARM, MAX_WARM))
         self._t   += 1
@@ -220,7 +236,7 @@ class SyntheticFaaSEnv:
         if rr < 1.0:
             idle_penalty = -1.0 * max(0, self._warm - 1)
         else:
-            needed = max(1, math.ceil(rr / 15.0))
+            needed = max(1, math.ceil(rr / PER_REPLICA_RPS))
             # FIX 8: Remove the -1 slack — penalize every excess container
             idle_penalty = -0.3 * max(0, self._warm - needed)
 
@@ -234,7 +250,18 @@ class SyntheticFaaSEnv:
         r = quality + idle_penalty + action_penalty
         
         done = self._t >= 1440
+        m["raw_delta"] = raw_delta
+        m["applied_delta"] = delta
         return self._obs(rr,m), r, done, False, m
+
+    def _stabilize_delta(self, delta: int, rr: float, reps: int) -> int:
+        if delta == 0:
+            return 0
+        if delta > 0:
+            up_threshold = reps * PER_REPLICA_RPS * SCALE_UP_UTIL
+            return delta if rr > up_threshold else 0
+        down_threshold = max(1, reps - 1) * PER_REPLICA_RPS * SCALE_DOWN_UTIL
+        return delta if rr < down_threshold else 0
 
     def _rr(self):
         t, h = self._t%1440, (self._t%1440)/60
@@ -250,12 +277,12 @@ class SyntheticFaaSEnv:
         return max(0.0, base + float(self.rng.normal(0, noise_scale)))
 
     def _sim(self, rr):
-        surp = self._warm*15 - rr
+        surp = self._warm * PER_REPLICA_RPS - rr
         cold_p = 1/(1+math.exp(surp/5))
         n    = max(0, int(rr))
         cold = int(self.rng.binomial(n, cold_p))
         warm = n - cold
-        idle = max(0, self._warm - max(1, int(rr/15)))
+        idle = max(0, self._warm - max(1, int(rr / PER_REPLICA_RPS)))
         return dict(cold_starts=cold, warm_hits=warm, idle_warm=idle,
                     cold_start_ratio=cold/max(1,n), containers=self._warm,
                     # FIX: latency = queue backlog, not raw total_requests
