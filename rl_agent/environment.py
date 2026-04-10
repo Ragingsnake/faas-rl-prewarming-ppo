@@ -34,6 +34,7 @@ ACTION_MAP = [-2, -1, 0, 1, 2]
 PER_REPLICA_RPS = 15.0
 SCALE_UP_UTIL = 0.90
 SCALE_DOWN_UTIL = 0.80
+MAX_STEP_CHANGE = 1
 
 
 @dataclass
@@ -59,9 +60,11 @@ class FaaSEnv:
 
     def step(self, action_idx: int):
         raw_delta = ACTION_MAP[action_idx]
-        delta = self._stabilize_delta(raw_delta, self._prev_req_rate, self._current_warm)
-        requested = self._current_warm + delta
+        prev_reps = self._current_warm
+        delta = self._stabilize_delta(raw_delta, self._prev_req_rate, prev_reps)
+        requested = prev_reps + delta
         target = int(np.clip(requested, MIN_WARM, MAX_WARM))
+        applied_delta = target - prev_reps
         self._set_replicas(target)
         # FIX 5: do NOT set _current_warm = target here.
         # CE may cap the replica count below what we requested.
@@ -88,11 +91,15 @@ class FaaSEnv:
             "req_rate": m["rr"], "reward": r,
             "queue": m["q"],
             "raw_delta": raw_delta,
-            "applied_delta": delta,
+            "applied_delta": applied_delta,
         }
 
     def _stabilize_delta(self, delta: int, rr: float, reps: int) -> int:
         if delta == 0:
+            return 0
+        delta = int(np.clip(delta, -MAX_STEP_CHANGE, MAX_STEP_CHANGE))
+        min_safe_reps = max(MIN_WARM, math.ceil(rr / PER_REPLICA_RPS))
+        if delta < 0 and reps + delta < min_safe_reps:
             return 0
         if delta > 0:
             up_threshold = reps * PER_REPLICA_RPS * SCALE_UP_UTIL
@@ -219,9 +226,11 @@ class SyntheticFaaSEnv:
 
     def step(self, action_idx):
         raw_delta = ACTION_MAP[action_idx]
-        delta = self._stabilize_delta(raw_delta, self._prev_rr, self._warm)
-        requested = self._warm + delta
+        prev_warm = self._warm
+        delta = self._stabilize_delta(raw_delta, self._prev_rr, prev_warm)
+        requested = prev_warm + delta
         self._warm = int(np.clip(requested, MIN_WARM, MAX_WARM))
+        applied_delta = self._warm - prev_warm
         self._t   += 1
         rr = self._rr()
         m  = self._sim(rr)
@@ -251,11 +260,15 @@ class SyntheticFaaSEnv:
         
         done = self._t >= 1440
         m["raw_delta"] = raw_delta
-        m["applied_delta"] = delta
+        m["applied_delta"] = applied_delta
         return self._obs(rr,m), r, done, False, m
 
     def _stabilize_delta(self, delta: int, rr: float, reps: int) -> int:
         if delta == 0:
+            return 0
+        delta = int(np.clip(delta, -MAX_STEP_CHANGE, MAX_STEP_CHANGE))
+        min_safe_reps = max(MIN_WARM, math.ceil(rr / PER_REPLICA_RPS))
+        if delta < 0 and reps + delta < min_safe_reps:
             return 0
         if delta > 0:
             up_threshold = reps * PER_REPLICA_RPS * SCALE_UP_UTIL
