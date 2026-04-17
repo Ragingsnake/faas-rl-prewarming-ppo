@@ -153,13 +153,35 @@ class PPOAgent:
 
     # ── action selection (inference mode) ────────────────────
     @torch.no_grad()                  # FIX: was missing → wasted memory on grads
-    def select_action(self, state: np.ndarray) -> Tuple[int, float, float]:
-        """Returns (action_idx, log_prob, value). Called every env step."""
+    def select_action(self, state: np.ndarray, current_reps: int = 1, rr: float = 0.0) -> Tuple[int, float, float]:
+        """Returns (action_idx, log_prob, value). Masks invalid actions."""
         s     = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         probs, value = self.policy(s)
-        dist  = torch.distributions.Categorical(probs)
+        
+        # Mask invalid actions
+        valid_mask = self._get_valid_action_mask(current_reps, rr)
+        masked_probs = probs.clone()
+        masked_probs[0, ~valid_mask] = 0.0
+        masked_probs = masked_probs / (masked_probs.sum() + 1e-8)
+        
+        dist  = torch.distributions.Categorical(masked_probs)
         action = dist.sample()
         return action.item(), dist.log_prob(action).item(), value.item()
+    
+    def _get_valid_action_mask(self, current_reps: int, rr: float) -> torch.Tensor:
+        """Return boolean mask [True=valid, False=blocked]."""
+        import math
+        from environment import MIN_WARM, MAX_WARM, PER_REPLICA_RPS
+        
+        valid = torch.ones(ACTION_DIM, dtype=torch.bool, device=self.device)
+        min_safe_reps = max(MIN_WARM, math.ceil(rr / PER_REPLICA_RPS))
+        
+        for i, delta in enumerate(ACTION_MAP):
+            new_reps = current_reps + delta
+            if new_reps > MAX_WARM or new_reps < min_safe_reps:
+                valid[i] = False
+        
+        return valid
 
     def action_delta(self, action_idx: int) -> int:
         return ACTION_MAP[action_idx]

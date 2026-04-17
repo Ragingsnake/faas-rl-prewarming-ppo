@@ -1,0 +1,32 @@
+"""
+metrics_logger.py — Log agent metrics to JSON for later visualization.
+"""
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, List
+
+log = logging.getLogger(__name__)
+
+
+class MetricsLogger:
+    """Collect step-by-step metrics for visualization."""
+    
+    def __init__(self, output_path: str = "checkpoints/metrics.json"):
+        self.output_path = Path(output_path)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.metrics: List[Dict[str, Any]] = []
+    
+    def log_step(self, step: int, **kwargs):
+        """Log a single step with arbitrary kwargs."""
+        record = {"step": step, **kwargs}
+        self.metrics.append(record)
+    
+    def save(self):
+        """Persist metrics to JSON."""
+        with open(self.output_path, "w") as f:
+            json.dump(self.metrics, f, indent=2)
+        log.info("Metrics saved to %s (%d steps)", self.output_path, len(self.metrics))
+    
+    def __len__(self) -> int:
+        return len(self.metrics)

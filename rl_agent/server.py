@@ -23,11 +23,12 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, FileResponse
 from pydantic import BaseModel
 
 from ppo_agent import PPOAgent, ROLLOUT_STEPS
 from environment import EnvConfig, FaaSEnv
+from metrics_logger import MetricsLogger
 
 # ──────────────────────────────────────────────────────────────
 # Config from environment variables
@@ -40,6 +41,7 @@ FUNCTION_NAME = os.getenv("FAAS_FUNCTION",     "echo-fn")
 STEP_SECONDS  = int(os.getenv("STEP_SECONDS",  "15"))
 CKPT_PATH     = os.getenv("CHECKPOINT_PATH",   "/checkpoints/agent.pt")
 PRETRAIN_CKPT = os.getenv("PRETRAIN_CKPT",     "/checkpoints/pretrained.pt")
+METRICS_PATH  = os.getenv("METRICS_PATH",      "/checkpoints/metrics.json")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +53,7 @@ log = logging.getLogger("rl-server")
 app    = FastAPI(title="FaaS RL Pre-warmer", version="1.0.0")
 _agent: PPOAgent | None = None
 _env:   FaaSEnv   | None = None
+_metrics: MetricsLogger = MetricsLogger(METRICS_PATH)
 _stats: dict = {
     "steps":         0,
     "total_reward":  0.0,
@@ -102,16 +105,15 @@ def _control_loop():
             continue
 
         # ── act ───────────────────────────────────────────────
-        action, log_prob, value = _agent.select_action(state)
+        action, log_prob, value = _agent.select_action(state, current_reps=_env._current_warm, rr=_env._prev_req_rate)
         raw_delta = _agent.action_delta(action)
-        log.info(f"Step {_stats['steps']}: Agent chose Action {action} (Raw Delta: {raw_delta} containers)")
+        log.info(f"Step {_stats['steps']}: Agent chose Action {action} (Delta: {raw_delta} containers)")
         
         next_state, reward, done, info = _env.step(action)
-        applied_delta = info.get("applied_delta", raw_delta)
         
         log.info(
             f"Result -> Reps: {info.get('warm_containers')}, Traffic: {info.get('req_rate'):.1f} RPS, "
-            f"Queue: {info.get('queue', 0):.1f}, Applied Delta: {applied_delta}, Reward: {reward:.2f}"
+            f"Queue: {info.get('queue', 0):.1f}, Reward: {reward:.2f}"
         )
         # ── store ─────────────────────────────────────────────
         _agent.store(state, action, log_prob, reward, value, done)
@@ -134,7 +136,7 @@ def _control_loop():
                 bootstrap = 0.0
             last_losses = _agent.learn(last_value=bootstrap)
 
-        # ── update stats ──────────────────────────────────────
+        # ── update stats & log metrics ────────────────────────
         with _lock:
             _stats["steps"]           += 1
             _stats["total_reward"]    += reward
@@ -143,6 +145,18 @@ def _control_loop():
             _stats["warm_containers"]  = info.get("warm_containers", 0)
             _stats["last_cold_starts"] = info.get("cold_starts", 0)
             _stats["entropy"]          = last_losses.get("entropy", 0.0)
+            
+            # Log to metrics file
+            _metrics.log_step(
+                step=_stats["steps"],
+                latency=info.get("queue", 0),
+                cold_starts=info.get("cold_starts", 0),
+                warm_hits=info.get("warm_hits", 0),
+                queue=info.get("queue", 0),
+                warm_containers=info.get("warm_containers", 0),
+                req_rate=info.get("req_rate", 0.0),
+                reward=reward,
+            )
 
         # ── periodic checkpoint (only after at least one update) ──
         if _stats["steps"] % 20 == 0 and last_losses:
@@ -231,6 +245,31 @@ def manual_train(req: TrainRequest):
         "gradient_steps": len(losses),
         "mean_loss": float(np.mean(losses)) if losses else 0.0,
     }
+
+
+@app.post("/save-metrics")
+def save_metrics():
+    """Save collected metrics to JSON and generate chart."""
+    _metrics.save()
+    import subprocess
+    try:
+        subprocess.run(
+            ["python", "visualize_metrics.py", "--input", METRICS_PATH, "--output", "checkpoints/chart.png"],
+            check=True,
+            cwd=str(Path(__file__).parent),
+        )
+        return {"saved": METRICS_PATH, "chart": "checkpoints/chart.png"}
+    except subprocess.CalledProcessError as e:
+        return {"error": str(e)}
+
+
+@app.get("/download-chart")
+def download_chart():
+    """Download the generated chart PNG."""
+    chart_path = Path("checkpoints/chart.png")
+    if chart_path.exists():
+        return FileResponse(chart_path, media_type="image/png", filename="chart.png")
+    return {"error": "Chart not found. Run POST /save-metrics first."}
 
 
 if __name__ == "__main__":
