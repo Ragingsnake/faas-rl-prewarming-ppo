@@ -14,7 +14,10 @@ class MetricsLogger:
     
     def __init__(self, output_path: str = "checkpoints/metrics.json"):
         self.output_path = Path(output_path)
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            log.warning("Cannot create %s, metrics will not be persisted", self.output_path.parent)
         self.metrics: List[Dict[str, Any]] = []
     
     def log_step(self, step: int, **kwargs):

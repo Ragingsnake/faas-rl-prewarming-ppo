@@ -39,9 +39,9 @@ FAAS_USER     = os.getenv("OPENFAAS_USER",     "admin")
 FAAS_PASS     = os.getenv("OPENFAAS_PASS",     "admin")
 FUNCTION_NAME = os.getenv("FAAS_FUNCTION",     "echo-fn")
 STEP_SECONDS  = int(os.getenv("STEP_SECONDS",  "15"))
-CKPT_PATH     = os.getenv("CHECKPOINT_PATH",   "/checkpoints/agent.pt")
-PRETRAIN_CKPT = os.getenv("PRETRAIN_CKPT",     "/checkpoints/pretrained.pt")
-METRICS_PATH  = os.getenv("METRICS_PATH",      "/checkpoints/metrics.json")
+CKPT_PATH     = os.getenv("CHECKPOINT_PATH",   "checkpoints/agent.pt")
+PRETRAIN_CKPT = os.getenv("PRETRAIN_CKPT",     "checkpoints/pretrained.pt")
+METRICS_PATH  = os.getenv("METRICS_PATH",      "checkpoints/metrics.json")
 
 logging.basicConfig(
     level=logging.INFO,

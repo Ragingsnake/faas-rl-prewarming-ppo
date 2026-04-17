@@ -162,7 +162,17 @@ class PPOAgent:
         valid_mask = self._get_valid_action_mask(current_reps, rr)
         masked_probs = probs.clone()
         masked_probs[0, ~valid_mask] = 0.0
-        masked_probs = masked_probs / (masked_probs.sum() + 1e-8)
+        
+        # Ensure at least action 2 (hold) is always valid (safety fallback)
+        if masked_probs.sum() < 1e-8:
+            log.warning("All actions masked! Forcing action 2 (hold) as valid.")
+            masked_probs[0, 2] = 1.0
+        else:
+            masked_probs = masked_probs / (masked_probs.sum() + 1e-8)
+        
+        # Clamp to prevent NaN
+        masked_probs = torch.clamp(masked_probs, min=1e-8)
+        masked_probs = masked_probs / masked_probs.sum()
         
         dist  = torch.distributions.Categorical(masked_probs)
         action = dist.sample()
@@ -174,11 +184,22 @@ class PPOAgent:
         from environment import MIN_WARM, MAX_WARM, PER_REPLICA_RPS
         
         valid = torch.ones(ACTION_DIM, dtype=torch.bool, device=self.device)
-        min_safe_reps = max(MIN_WARM, math.ceil(rr / PER_REPLICA_RPS))
+        
+        # Always allow hold (action 2)
+        valid[2] = True
+        
+        # Only block scale-up if way over capacity, scale-down if would under-provision
+        needed = max(MIN_WARM, math.ceil(rr / PER_REPLICA_RPS))
         
         for i, delta in enumerate(ACTION_MAP):
+            if i == 2:  # hold is always valid
+                continue
             new_reps = current_reps + delta
-            if new_reps > MAX_WARM or new_reps < min_safe_reps:
+            # Only block if it violates hard bounds
+            if new_reps > MAX_WARM or new_reps < MIN_WARM:
+                valid[i] = False
+            # Don't block scale-down if close to needed (allow some flexibility)
+            elif delta < 0 and new_reps < needed - 1:  # Allow 1 container buffer
                 valid[i] = False
         
         return valid
