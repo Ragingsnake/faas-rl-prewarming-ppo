@@ -95,6 +95,9 @@ class FaaSEnv:
         }
 
     def _stabilize_delta(self, delta: int, rr: float, reps: int) -> int:
+        # Deterministic safety mode: when idle, always move toward 1 replica.
+        if rr <= 0.5 and reps > MIN_WARM:
+            return -1
         if delta == 0:
             return 0
         delta = int(np.clip(delta, -MAX_STEP_CHANGE, MAX_STEP_CHANGE))

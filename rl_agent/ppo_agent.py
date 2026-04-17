@@ -166,13 +166,9 @@ class PPOAgent:
         # Ensure at least action 2 (hold) is always valid (safety fallback)
         if masked_probs.sum() < 1e-8:
             log.warning("All actions masked! Forcing action 2 (hold) as valid.")
+            masked_probs.zero_()
             masked_probs[0, 2] = 1.0
-        else:
-            masked_probs = masked_probs / (masked_probs.sum() + 1e-8)
-        
-        # Clamp to prevent NaN
-        masked_probs = torch.clamp(masked_probs, min=1e-8)
-        masked_probs = masked_probs / masked_probs.sum()
+        masked_probs = masked_probs / (masked_probs.sum() + 1e-8)
         
         dist  = torch.distributions.Categorical(masked_probs)
         action = dist.sample()
@@ -181,27 +177,41 @@ class PPOAgent:
     def _get_valid_action_mask(self, current_reps: int, rr: float) -> torch.Tensor:
         """Return boolean mask [True=valid, False=blocked]."""
         import math
-        from environment import MIN_WARM, MAX_WARM, PER_REPLICA_RPS
+        from environment import (
+            MIN_WARM, MAX_WARM, PER_REPLICA_RPS,
+            MAX_STEP_CHANGE, SCALE_UP_UTIL, SCALE_DOWN_UTIL,
+        )
         
-        valid = torch.ones(ACTION_DIM, dtype=torch.bool, device=self.device)
-        
-        # Always allow hold (action 2)
-        valid[2] = True
-        
-        # Only block scale-up if way over capacity, scale-down if would under-provision
+        valid = torch.zeros(ACTION_DIM, dtype=torch.bool, device=self.device)
         needed = max(MIN_WARM, math.ceil(rr / PER_REPLICA_RPS))
-        
+
+        def projected_delta(raw_delta: int) -> int:
+            delta = int(np.clip(raw_delta, -MAX_STEP_CHANGE, MAX_STEP_CHANGE))
+            # Force deterministic scale-down at idle traffic until 1 replica
+            if rr <= 0.5 and current_reps > MIN_WARM:
+                return -1
+            if delta < 0 and current_reps + delta < needed:
+                return 0
+            if delta > 0:
+                up_threshold = current_reps * PER_REPLICA_RPS * SCALE_UP_UTIL
+                return delta if rr > up_threshold else 0
+            down_threshold = max(1, current_reps - 1) * PER_REPLICA_RPS * SCALE_DOWN_UTIL
+            return delta if rr < down_threshold else 0
+
         for i, delta in enumerate(ACTION_MAP):
-            if i == 2:  # hold is always valid
+            applied = projected_delta(delta)
+            target = current_reps + applied
+            if target < MIN_WARM or target > MAX_WARM:
                 continue
-            new_reps = current_reps + delta
-            # Only block if it violates hard bounds
-            if new_reps > MAX_WARM or new_reps < MIN_WARM:
-                valid[i] = False
-            # Don't block scale-down if close to needed (allow some flexibility)
-            elif delta < 0 and new_reps < needed - 1:  # Allow 1 container buffer
-                valid[i] = False
-        
+            # Block non-hold actions that would become no-ops after gating.
+            if i != 2 and applied == 0:
+                continue
+            valid[i] = True
+
+        # Final safety: keep hold valid if everything else is blocked.
+        if not bool(valid.any()):
+            valid[2] = True
+
         return valid
 
     def action_delta(self, action_idx: int) -> int:
