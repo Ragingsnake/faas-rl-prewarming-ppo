@@ -42,6 +42,7 @@ STEP_SECONDS  = int(os.getenv("STEP_SECONDS",  "15"))
 CKPT_PATH     = os.getenv("CHECKPOINT_PATH",   "checkpoints/agent.pt")
 PRETRAIN_CKPT = os.getenv("PRETRAIN_CKPT",     "checkpoints/pretrained.pt")
 METRICS_PATH  = os.getenv("METRICS_PATH",      "checkpoints/metrics.json")
+AGENT_START_MODE = os.getenv("AGENT_START_MODE", "active").strip().lower()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,7 +63,8 @@ _stats: dict = {
     "warm_containers": 0,
     "last_cold_starts": 0,
     "entropy":       0.0,
-    "paused":        False,
+    "paused":        AGENT_START_MODE == "inactive",
+    "agent_active":  AGENT_START_MODE != "inactive",
 }
 _lock = threading.Lock()
 
@@ -98,16 +100,21 @@ def _control_loop():
 
     while True:
         with _lock:
-            paused = _stats["paused"]
-
-        if paused:
-            time.sleep(1)
-            continue
+            agent_active = _stats["agent_active"]
 
         # ── act ───────────────────────────────────────────────
-        action, log_prob, value = _agent.select_action(state, current_reps=_env._current_warm, rr=_env._prev_req_rate)
+        if agent_active:
+            action, log_prob, value = _agent.select_action(
+                state, current_reps=_env._current_warm, rr=_env._prev_req_rate
+            )
+        else:
+            action, log_prob, value = 2, 0.0, 0.0  # hold while inactive
         raw_delta = _agent.action_delta(action)
-        log.info(f"Step {_stats['steps']}: Agent chose Action {action} (Raw Delta: {raw_delta} containers)")
+        mode_text = "active" if agent_active else "inactive"
+        log.info(
+            f"Step {_stats['steps']}: Agent mode={mode_text}, Action {action} "
+            f"(Raw Delta: {raw_delta} containers)"
+        )
         
         next_state, reward, done, info = _env.step(action)
         applied_delta = info.get("applied_delta", 0)
@@ -117,7 +124,8 @@ def _control_loop():
             f"Queue: {info.get('queue', 0):.1f}, Applied Delta: {applied_delta}, Reward: {reward:.2f}"
         )
         # ── store ─────────────────────────────────────────────
-        _agent.store(state, action, log_prob, reward, value, done)
+        if agent_active:
+            _agent.store(state, action, log_prob, reward, value, done)
 
         state = next_state if not done else _env.reset()
 
@@ -125,7 +133,7 @@ def _control_loop():
         # PPO must accumulate ROLLOUT_STEPS transitions before updating.
         # Calling learn() with 1 sample causes std()=0 on the single-element
         # advantages tensor → degenerate gradients → NaN weights → crash.
-        if len(_agent.buffer) >= ROLLOUT_STEPS:
+        if agent_active and len(_agent.buffer) >= ROLLOUT_STEPS:
             # Bootstrap V(s) for the final non-terminal state
             if not done:
                 import torch as _torch
@@ -146,6 +154,8 @@ def _control_loop():
             _stats["warm_containers"]  = info.get("warm_containers", 0)
             _stats["last_cold_starts"] = info.get("cold_starts", 0)
             _stats["entropy"]          = last_losses.get("entropy", 0.0)
+            _stats["agent_active"]     = agent_active
+            _stats["paused"]           = not agent_active
             
             # Log to metrics file
             _metrics.log_step(
@@ -157,6 +167,7 @@ def _control_loop():
                 warm_containers=info.get("warm_containers", 0),
                 req_rate=info.get("req_rate", 0.0),
                 reward=reward,
+                agent_active=agent_active,
             )
 
         # ── periodic checkpoint (only after at least one update) ──
@@ -172,7 +183,7 @@ def _control_loop():
 def _startup():
     t = threading.Thread(target=_control_loop, daemon=True, name="rl-loop")
     t.start()
-    log.info("RL control loop started")
+    log.info("RL control loop started (start mode: %s)", AGENT_START_MODE)
 
 
 @app.get("/health")
@@ -217,15 +228,29 @@ def metrics():
 @app.post("/pause")
 def pause():
     with _lock:
+        _stats["agent_active"] = False
         _stats["paused"] = True
-    return {"paused": True}
+    return {"paused": True, "agent_active": False}
 
 
 @app.post("/resume")
 def resume():
     with _lock:
+        _stats["agent_active"] = True
         _stats["paused"] = False
-    return {"paused": False}
+    return {"paused": False, "agent_active": True}
+
+
+@app.post("/set-mode")
+def set_mode(mode: str):
+    m = mode.strip().lower()
+    if m not in {"active", "inactive"}:
+        return {"error": "mode must be 'active' or 'inactive'"}
+    active = m == "active"
+    with _lock:
+        _stats["agent_active"] = active
+        _stats["paused"] = not active
+    return {"mode": m, "agent_active": active}
 
 
 class TrainRequest(BaseModel):
@@ -249,28 +274,45 @@ def manual_train(req: TrainRequest):
 
 
 @app.post("/save-metrics")
-def save_metrics():
+def save_metrics(
+    start_step: int | None = None,
+    end_step: int | None = None,
+    output: str = "checkpoints/chart.png",
+    title: str = "FaaS RL Agent Metrics",
+):
     """Save collected metrics to JSON and generate chart."""
     _metrics.save()
     import subprocess
     try:
+        cmd = ["python", "visualize_metrics.py", "--input", METRICS_PATH, "--output", output, "--title", title]
+        if start_step is not None:
+            cmd += ["--start-step", str(start_step)]
+        if end_step is not None:
+            cmd += ["--end-step", str(end_step)]
         subprocess.run(
-            ["python", "visualize_metrics.py", "--input", METRICS_PATH, "--output", "checkpoints/chart.png"],
+            cmd,
             check=True,
             cwd=str(Path(__file__).parent),
         )
-        return {"saved": METRICS_PATH, "chart": "checkpoints/chart.png"}
+        return {"saved": METRICS_PATH, "chart": output, "start_step": start_step, "end_step": end_step}
     except subprocess.CalledProcessError as e:
         return {"error": str(e)}
 
 
+@app.post("/reset-metrics")
+def reset_metrics():
+    _metrics.reset()
+    return {"reset": True}
+
+
 @app.get("/download-chart")
-def download_chart():
-    """Download the generated chart PNG."""
-    chart_path = Path("checkpoints/chart.png")
+def download_chart(name: str = "chart.png"):
+    """Download a generated chart PNG from checkpoints/."""
+    safe_name = Path(name).name
+    chart_path = Path("checkpoints") / safe_name
     if chart_path.exists():
-        return FileResponse(chart_path, media_type="image/png", filename="chart.png")
-    return {"error": "Chart not found. Run POST /save-metrics first."}
+        return FileResponse(chart_path, media_type="image/png", filename=safe_name)
+    return {"error": f"Chart not found: {safe_name}"}
 
 
 if __name__ == "__main__":

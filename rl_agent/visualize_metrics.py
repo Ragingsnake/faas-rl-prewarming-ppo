@@ -16,8 +16,20 @@ def load_metrics(path: str) -> list:
         return json.load(f)
 
 
-def plot_metrics(metrics: list, output_path: str = "chart.png"):
+def filter_metrics(metrics: list, start_step: int | None, end_step: int | None) -> list:
+    out = metrics
+    if start_step is not None:
+        out = [m for m in out if m.get("step", -1) >= start_step]
+    if end_step is not None:
+        out = [m for m in out if m.get("step", -1) <= end_step]
+    return out
+
+
+def plot_metrics(metrics: list, output_path: str = "chart.png", title: str = "FaaS RL Agent Metrics"):
     """Generate 4-panel chart."""
+    if not metrics:
+        raise ValueError("No metrics found for requested range")
+
     steps = [m["step"] for m in metrics]
     
     # Extract data with defaults for missing keys
@@ -28,7 +40,7 @@ def plot_metrics(metrics: list, output_path: str = "chart.png"):
     containers = [m.get("warm_containers", 1) for m in metrics]
     
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    fig.suptitle("FaaS RL Agent Metrics", fontsize=14, fontweight="bold")
+    fig.suptitle(title, fontsize=14, fontweight="bold")
     
     # Top-left: Latency
     axes[0, 0].plot(steps, latency, color="steelblue", linewidth=1.5)
@@ -70,8 +82,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize FaaS RL metrics")
     parser.add_argument("--input", default="checkpoints/metrics.json", help="Input metrics JSON")
     parser.add_argument("--output", default="chart.png", help="Output PNG path")
+    parser.add_argument("--start-step", type=int, default=None, help="Inclusive start step filter")
+    parser.add_argument("--end-step", type=int, default=None, help="Inclusive end step filter")
+    parser.add_argument("--title", default="FaaS RL Agent Metrics", help="Chart title")
     args = parser.parse_args()
     
     metrics = load_metrics(args.input)
-    print(f"Loaded {len(metrics)} steps from {args.input}")
-    plot_metrics(metrics, args.output)
+    filtered = filter_metrics(metrics, args.start_step, args.end_step)
+    print(f"Loaded {len(metrics)} steps from {args.input}, plotting {len(filtered)}")
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    plot_metrics(filtered, args.output, title=args.title)

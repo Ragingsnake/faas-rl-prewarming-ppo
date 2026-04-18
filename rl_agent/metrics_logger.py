@@ -3,6 +3,7 @@ metrics_logger.py — Log agent metrics to JSON for later visualization.
 """
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -22,7 +23,7 @@ class MetricsLogger:
     
     def log_step(self, step: int, **kwargs):
         """Log a single step with arbitrary kwargs."""
-        record = {"step": step, **kwargs}
+        record = {"step": step, "ts": time.time(), **kwargs}
         self.metrics.append(record)
     
     def save(self):
@@ -33,3 +34,7 @@ class MetricsLogger:
     
     def __len__(self) -> int:
         return len(self.metrics)
+
+    def reset(self):
+        """Clear in-memory metrics."""
+        self.metrics = []

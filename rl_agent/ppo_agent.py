@@ -154,65 +154,47 @@ class PPOAgent:
     # ── action selection (inference mode) ────────────────────
     @torch.no_grad()                  # FIX: was missing → wasted memory on grads
     def select_action(self, state: np.ndarray, current_reps: int = 1, rr: float = 0.0) -> Tuple[int, float, float]:
-        """Returns (action_idx, log_prob, value). Masks invalid actions."""
+        """Returns (action_idx, log_prob, value) with canonical action remapping."""
         s     = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         probs, value = self.policy(s)
-        
-        # Mask invalid actions
-        valid_mask = self._get_valid_action_mask(current_reps, rr)
-        masked_probs = probs.clone()
-        masked_probs[0, ~valid_mask] = 0.0
-        
-        # Ensure at least action 2 (hold) is always valid (safety fallback)
-        if masked_probs.sum() < 1e-8:
-            log.warning("All actions masked! Forcing action 2 (hold) as valid.")
-            masked_probs.zero_()
-            masked_probs[0, 2] = 1.0
-        masked_probs = masked_probs / (masked_probs.sum() + 1e-8)
-        
-        dist  = torch.distributions.Categorical(masked_probs)
+
+        # Map raw action probabilities into canonical effective actions:
+        # -1 -> action 1, 0 -> action 2, +1 -> action 3
+        # This prevents "choose +2 then get corrected to 0" noise in logs/policy.
+        canonical_probs = torch.zeros_like(probs)
+        for i, raw_delta in enumerate(ACTION_MAP):
+            eff_delta = self._projected_delta(raw_delta, current_reps, rr)
+            canonical_action = 1 if eff_delta < 0 else 3 if eff_delta > 0 else 2
+            canonical_probs[0, canonical_action] += probs[0, i]
+
+        if canonical_probs.sum() < 1e-8:
+            canonical_probs.zero_()
+            canonical_probs[0, 2] = 1.0
+        canonical_probs = canonical_probs / (canonical_probs.sum() + 1e-8)
+
+        dist  = torch.distributions.Categorical(canonical_probs)
         action = dist.sample()
         return action.item(), dist.log_prob(action).item(), value.item()
-    
-    def _get_valid_action_mask(self, current_reps: int, rr: float) -> torch.Tensor:
-        """Return boolean mask [True=valid, False=blocked]."""
+
+    def _projected_delta(self, raw_delta: int, current_reps: int, rr: float) -> int:
         import math
         from environment import (
-            MIN_WARM, MAX_WARM, PER_REPLICA_RPS,
+            MIN_WARM, PER_REPLICA_RPS,
             MAX_STEP_CHANGE, SCALE_UP_UTIL, SCALE_DOWN_UTIL,
         )
-        
-        valid = torch.zeros(ACTION_DIM, dtype=torch.bool, device=self.device)
+        delta = int(np.clip(raw_delta, -MAX_STEP_CHANGE, MAX_STEP_CHANGE))
+        # Force deterministic scale-down at idle traffic until 1 replica
+        if rr <= 0.5 and current_reps > MIN_WARM:
+            return -1
+
         needed = max(MIN_WARM, math.ceil(rr / PER_REPLICA_RPS))
-
-        def projected_delta(raw_delta: int) -> int:
-            delta = int(np.clip(raw_delta, -MAX_STEP_CHANGE, MAX_STEP_CHANGE))
-            # Force deterministic scale-down at idle traffic until 1 replica
-            if rr <= 0.5 and current_reps > MIN_WARM:
-                return -1
-            if delta < 0 and current_reps + delta < needed:
-                return 0
-            if delta > 0:
-                up_threshold = current_reps * PER_REPLICA_RPS * SCALE_UP_UTIL
-                return delta if rr > up_threshold else 0
-            down_threshold = max(1, current_reps - 1) * PER_REPLICA_RPS * SCALE_DOWN_UTIL
-            return delta if rr < down_threshold else 0
-
-        for i, delta in enumerate(ACTION_MAP):
-            applied = projected_delta(delta)
-            target = current_reps + applied
-            if target < MIN_WARM or target > MAX_WARM:
-                continue
-            # Block non-hold actions that would become no-ops after gating.
-            if i != 2 and applied == 0:
-                continue
-            valid[i] = True
-
-        # Final safety: keep hold valid if everything else is blocked.
-        if not bool(valid.any()):
-            valid[2] = True
-
-        return valid
+        if delta < 0 and current_reps + delta < needed:
+            return 0
+        if delta > 0:
+            up_threshold = current_reps * PER_REPLICA_RPS * SCALE_UP_UTIL
+            return delta if rr > up_threshold else 0
+        down_threshold = max(1, current_reps - 1) * PER_REPLICA_RPS * SCALE_DOWN_UTIL
+        return delta if rr < down_threshold else 0
 
     def action_delta(self, action_idx: int) -> int:
         return ACTION_MAP[action_idx]

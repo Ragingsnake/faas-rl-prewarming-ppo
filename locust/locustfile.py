@@ -1,12 +1,10 @@
 """
-locustfile.py - Load Test for RL Pre-warmer
-Targets the figlet function across 5 load scenarios.
-Algorithm-agnostic: the agent reads Prometheus, Locust doesn't talk to it.
+locustfile.py - Case-based Load Tests for RL Pre-warmer.
+Set LOAD_CASE env to one of: stable_low, stable_high, gradual_ramp, sudden_spike
 """
 
 import os
 import time
-import random
 from typing import List, Tuple
 from locust import HttpUser, task, between, events
 from locust.shape import LoadTestShape
@@ -15,25 +13,21 @@ FAAS_USER = os.getenv("OPENFAAS_USER", "admin")
 FAAS_PASS = os.getenv("OPENFAAS_PASS", "admin")
 FUNCTION  = os.getenv("FAAS_FUNCTION", "echo-fn")
 
-# (elapsed_seconds, target_users)  ~1 user ≈ 1 RPS with wait_time between(0.8, 1.2)
-SCENARIO_TIMELINE: List[Tuple[int, int]] = [
-    (0,    10),   # 1. STABLE_LOW
-    (180,  10),
-    (181,  60),   # 2. STABLE_HIGH
-    (360,  60),
-    (361,  5),    # 3. GRADUAL_RAMP
-    (661,  120),
-    (662,  5),    # 4. SUDDEN_SPIKE
-    (680,  200),
-    (710,  5),
-    (740,  5),    # 5. JITTERY
-    (1140, 5),
-]
+LOAD_CASE = os.getenv("LOAD_CASE", "stable_low").strip().lower()
+CASE_TIMELINES: dict[str, List[Tuple[int, int]]] = {
+    # (elapsed_seconds, target_users)
+    "stable_low": [(0, 10), (240, 10)],
+    "stable_high": [(0, 60), (240, 60)],
+    "gradual_ramp": [(0, 5), (240, 120)],
+    "sudden_spike": [(0, 5), (90, 5), (110, 180), (150, 180), (170, 5), (240, 5)],
+}
+
+if LOAD_CASE not in CASE_TIMELINES:
+    raise ValueError(f"Unknown LOAD_CASE={LOAD_CASE}. Choose one of: {', '.join(CASE_TIMELINES)}")
+SCENARIO_TIMELINE = CASE_TIMELINES[LOAD_CASE]
 
 
 class FaaSScenarioShape(LoadTestShape):
-    _jitter_seed = random.Random(42)
-
     # FIX: get_current_run_time() was removed in Locust 2.x
     # Track start time manually on first tick instead
     _start_time: float = 0.0
@@ -47,14 +41,6 @@ class FaaSScenarioShape(LoadTestShape):
             return None
 
         users = self._interpolate(elapsed)
-
-        # Jittery phase: random noise + occasional spike
-        if elapsed >= 740:
-            noise = self._jitter_seed.uniform(-0.4, 0.4)
-            users = max(1, int(users * (1 + noise)))
-            if self._jitter_seed.random() < 0.05:
-                users = min(180, users + self._jitter_seed.randint(50, 100))
-
         return (users, 20)
 
     def _interpolate(self, elapsed):
@@ -90,7 +76,7 @@ class FaaSUser(HttpUser):
 
 @events.test_start.add_listener
 def on_test_start(environment, **_kw):
-    print(f"Starting test → function: {FUNCTION}")
+    print(f"Starting case '{LOAD_CASE}' → function: {FUNCTION}")
 
 
 @events.test_stop.add_listener

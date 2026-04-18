@@ -18,13 +18,15 @@ export OPENFAAS_USER=admin
 export OPENFAAS_PASS=$(kubectl get secret -n openfaas basic-auth \
     -o jsonpath="{.data.basic-auth-password}" | base64 --decode)
 export FAAS_FUNCTION=figlet-fn    # must match stack.yml function name
+export LOAD_CASE=${LOAD_CASE:-stable_low}
 
 echo "OPENFAAS_USER: $OPENFAAS_USER"
 echo "FAAS_FUNCTION: $FAAS_FUNCTION"
 echo "Gateway: http://127.0.0.1:8080"
 echo ""
 
-echo "starting headless load test for 19 minutes..."
+echo "LOAD_CASE: $LOAD_CASE"
+echo "starting headless load test..."
 # FIX: --headless requires --users and --spawn-rate
 # These are the max caps; the LoadTestShape in locustfile-local.py
 # controls the actual ramp profile within these limits
@@ -33,9 +35,9 @@ locust -f locustfile.py \
     --headless \
     --users 200 \
     --spawn-rate 20 \
-    --run-time 19m \
-    --html report.html \
+    --run-time 250s \
+    --html "report_${LOAD_CASE}.html" \
     --exit-code-on-error 0
 
 echo ""
-echo "done. report saved to locust/report.html"
+echo "done. report saved to locust/report_${LOAD_CASE}.html"
