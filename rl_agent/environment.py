@@ -98,7 +98,7 @@ class FaaSEnv:
 
     def _stabilize_delta(self, delta: int, rr: float, reps: int) -> int:
         # Deterministic safety mode: when idle, always move toward 1 replica.
-        if rr <= 0.5 and reps > MIN_WARM:
+        if rr <= 5.0 and reps > MIN_WARM:
             return -1
         # Emergency safety mode: if heavily overloaded, force scale-up by 1.
         if rr > reps * PER_REPLICA_RPS * 1.2 and reps < MAX_WARM:
@@ -276,7 +276,7 @@ class SyntheticFaaSEnv:
         return self._obs(rr,m), r, done, False, m
 
     def _stabilize_delta(self, delta: int, rr: float, reps: int) -> int:
-        if rr <= 0.5 and reps > MIN_WARM:
+        if rr <= 5.0 and reps > MIN_WARM:
             return -1
         if rr > reps * PER_REPLICA_RPS * 1.2 and reps < MAX_WARM:
             return 1

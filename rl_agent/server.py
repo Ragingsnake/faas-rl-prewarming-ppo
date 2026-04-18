@@ -43,6 +43,7 @@ CKPT_PATH     = os.getenv("CHECKPOINT_PATH",   "checkpoints/agent.pt")
 PRETRAIN_CKPT = os.getenv("PRETRAIN_CKPT",     "checkpoints/pretrained.pt")
 METRICS_PATH  = os.getenv("METRICS_PATH",      "checkpoints/metrics.json")
 AGENT_START_MODE = os.getenv("AGENT_START_MODE", "active").strip().lower()
+AGENT_LEARN_ENABLED = os.getenv("AGENT_LEARN_ENABLED", "true").strip().lower() == "true"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,6 +66,7 @@ _stats: dict = {
     "entropy":       0.0,
     "paused":        AGENT_START_MODE == "inactive",
     "agent_active":  AGENT_START_MODE != "inactive",
+    "learning_enabled": AGENT_LEARN_ENABLED,
 }
 _lock = threading.Lock()
 
@@ -101,6 +103,7 @@ def _control_loop():
     while True:
         with _lock:
             agent_active = _stats["agent_active"]
+            learning_enabled = _stats["learning_enabled"]
 
         # ── act ───────────────────────────────────────────────
         if agent_active:
@@ -133,7 +136,7 @@ def _control_loop():
         # PPO must accumulate ROLLOUT_STEPS transitions before updating.
         # Calling learn() with 1 sample causes std()=0 on the single-element
         # advantages tensor → degenerate gradients → NaN weights → crash.
-        if agent_active and len(_agent.buffer) >= ROLLOUT_STEPS:
+        if agent_active and learning_enabled and len(_agent.buffer) >= ROLLOUT_STEPS:
             # Bootstrap V(s) for the final non-terminal state
             if not done:
                 import torch as _torch
@@ -156,6 +159,7 @@ def _control_loop():
             _stats["entropy"]          = last_losses.get("entropy", 0.0)
             _stats["agent_active"]     = agent_active
             _stats["paused"]           = not agent_active
+            _stats["learning_enabled"] = learning_enabled
             
             # Log to metrics file
             _metrics.log_step(
@@ -251,6 +255,13 @@ def set_mode(mode: str):
         _stats["agent_active"] = active
         _stats["paused"] = not active
     return {"mode": m, "agent_active": active}
+
+
+@app.post("/set-learning")
+def set_learning(enabled: bool):
+    with _lock:
+        _stats["learning_enabled"] = bool(enabled)
+    return {"learning_enabled": bool(enabled)}
 
 
 class TrainRequest(BaseModel):

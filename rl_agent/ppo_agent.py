@@ -173,16 +173,20 @@ class PPOAgent:
 
     def _get_valid_action_mask(self, current_reps: int, rr: float) -> torch.Tensor:
         import math
-        from environment import MIN_WARM, MAX_WARM, PER_REPLICA_RPS
+        from environment import MIN_WARM, MAX_WARM, PER_REPLICA_RPS, SCALE_UP_UTIL
         valid = torch.ones(ACTION_DIM, dtype=torch.bool, device=self.device)
 
         needed = max(MIN_WARM, math.ceil(rr / PER_REPLICA_RPS))
         under_provisioned = current_reps < needed
-        very_idle = rr <= 1.0 and current_reps > MIN_WARM
+        very_idle = rr <= 5.0 and current_reps > MIN_WARM
+        up_threshold = current_reps * PER_REPLICA_RPS * SCALE_UP_UTIL
 
         for i, delta in enumerate(ACTION_MAP):
             target = current_reps + delta
             if target < MIN_WARM or target > MAX_WARM:
+                valid[i] = False
+            # Avoid low-load noisy up-actions that will be gated to no-op.
+            if delta > 0 and rr <= up_threshold:
                 valid[i] = False
 
         if under_provisioned:

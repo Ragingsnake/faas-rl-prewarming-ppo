@@ -25,6 +25,11 @@ set_mode() {
     curl -s -X POST "$RL_SERVER/set-mode?mode=$mode" > /dev/null
 }
 
+set_learning() {
+    local enabled="$1"
+    curl -s -X POST "$RL_SERVER/set-learning?enabled=$enabled" > /dev/null
+}
+
 save_chart_for_range() {
     local mode="$1"
     local case_name="$2"
@@ -40,6 +45,8 @@ save_chart_for_range() {
 
 echo "Resetting in-memory metrics..."
 curl -s -X POST "$RL_SERVER/reset-metrics" > /dev/null
+echo "Disabling online learning for fair matrix comparison..."
+set_learning false
 
 echo "mode,case,start_step,end_step,chart_path" > results/case_ranges.csv
 
@@ -58,4 +65,5 @@ for mode in "${MODES[@]}"; do
 done
 
 set_mode active
+set_learning true
 echo "All runs complete. Metadata: locust/results/case_ranges.csv"

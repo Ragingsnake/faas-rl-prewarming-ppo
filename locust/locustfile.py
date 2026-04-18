@@ -17,9 +17,9 @@ LOAD_CASE = os.getenv("LOAD_CASE", "stable_low").strip().lower()
 CASE_TIMELINES: dict[str, List[Tuple[int, int]]] = {
     # (elapsed_seconds, target_users)
     "stable_low": [(0, 10), (240, 10)],
-    "stable_high": [(0, 60), (240, 60)],
-    "gradual_ramp": [(0, 5), (240, 120)],
-    "sudden_spike": [(0, 5), (90, 5), (110, 180), (150, 180), (170, 5), (240, 5)],
+    "stable_high": [(0, 50), (240, 50)],
+    "gradual_ramp": [(0, 5), (240, 75)],
+    "sudden_spike": [(0, 5), (90, 5), (110, 75), (150, 75), (170, 5), (240, 5)],
 }
 
 if LOAD_CASE not in CASE_TIMELINES:
