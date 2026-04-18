@@ -35,6 +35,8 @@ PER_REPLICA_RPS = 15.0
 SCALE_UP_UTIL = 0.90
 SCALE_DOWN_UTIL = 0.80
 MAX_STEP_CHANGE = 1
+RR_NORM = 150.0
+QUEUE_NORM = 150.0
 
 
 @dataclass
@@ -98,6 +100,9 @@ class FaaSEnv:
         # Deterministic safety mode: when idle, always move toward 1 replica.
         if rr <= 0.5 and reps > MIN_WARM:
             return -1
+        # Emergency safety mode: if heavily overloaded, force scale-up by 1.
+        if rr > reps * PER_REPLICA_RPS * 1.2 and reps < MAX_WARM:
+            return 1
         if delta == 0:
             return 0
         delta = int(np.clip(delta, -MAX_STEP_CHANGE, MAX_STEP_CHANGE))
@@ -114,10 +119,10 @@ class FaaSEnv:
         now = datetime.utcnow()
         h, d = now.hour + now.minute/60, now.weekday()
         return np.array([
-            np.clip(rr/100,0,1), np.clip(rdelta/100,-1,1),  # /100: realistic CE max ~75 RPS
+            np.clip(rr / RR_NORM, 0, 1), np.clip(rdelta / RR_NORM, -1, 1),
             math.sin(2*math.pi*h/24), math.cos(2*math.pi*h/24),
             math.sin(2*math.pi*d/7),  math.cos(2*math.pi*d/7),
-            self._current_warm/MAX_WARM, csr, np.clip(q/50,0,1),
+            self._current_warm/MAX_WARM, csr, np.clip(q / QUEUE_NORM, 0, 1),
         ], dtype=np.float32)
 
     def _reward(self, m: dict) -> float:
@@ -133,15 +138,17 @@ class FaaSEnv:
         else:
             quality = 0.0
 
-        # Idle cost: per excess container above what's actually needed
+        # Idle cost: stronger penalties at low traffic for faster scale-down.
         if m["rr"] < 1.0:
-            idle_penalty = -1.0 * max(0, m["reps"] - 1)   # [-4, 0] for CE max 5
+            idle_penalty = -1.2 * max(0, m["reps"] - 1)
+        elif m["rr"] < 5.0:
+            idle_penalty = -0.7 * max(0, m["reps"] - 1)
         else:
             needed = max(1, math.ceil(m["rr"] / PER_REPLICA_RPS))
-            # FIX 8: Remove the -1 slack — penalize every excess container
-            idle_penalty = -0.3 * max(0, m["reps"] - needed)
+            idle_penalty = -0.4 * max(0, m["reps"] - needed)
 
-        return quality + idle_penalty
+        queue_penalty = -0.02 * min(100.0, m["q"])
+        return quality + idle_penalty + queue_penalty
 
     def _scrape(self):
         # 1. Prometheus requires the namespace suffix in OpenFaaS CE!
@@ -246,11 +253,12 @@ class SyntheticFaaSEnv:
         else:
             quality = 0.0
         if rr < 1.0:
-            idle_penalty = -1.0 * max(0, self._warm - 1)
+            idle_penalty = -1.2 * max(0, self._warm - 1)
+        elif rr < 5.0:
+            idle_penalty = -0.7 * max(0, self._warm - 1)
         else:
             needed = max(1, math.ceil(rr / PER_REPLICA_RPS))
-            # FIX 8: Remove the -1 slack — penalize every excess container
-            idle_penalty = -0.3 * max(0, self._warm - needed)
+            idle_penalty = -0.4 * max(0, self._warm - needed)
 
         # No action penalty when scaling down at zero traffic — encourages aggressive scale-down
         action_penalty = -0.1 if (delta != 0 and rr > 1.0) else 0.0
@@ -259,7 +267,8 @@ class SyntheticFaaSEnv:
         if requested > MAX_WARM or requested < MIN_WARM:
             action_penalty -= 0.3
         
-        r = quality + idle_penalty + action_penalty
+        queue_penalty = -0.02 * min(100.0, float(m["queue"]))
+        r = quality + idle_penalty + queue_penalty + action_penalty
         
         done = self._t >= 1440
         m["raw_delta"] = raw_delta
@@ -267,6 +276,10 @@ class SyntheticFaaSEnv:
         return self._obs(rr,m), r, done, False, m
 
     def _stabilize_delta(self, delta: int, rr: float, reps: int) -> int:
+        if rr <= 0.5 and reps > MIN_WARM:
+            return -1
+        if rr > reps * PER_REPLICA_RPS * 1.2 and reps < MAX_WARM:
+            return 1
         if delta == 0:
             return 0
         delta = int(np.clip(delta, -MAX_STEP_CHANGE, MAX_STEP_CHANGE))
@@ -310,11 +323,10 @@ class SyntheticFaaSEnv:
         rr = rr if rr is not None else self._rr()
         m  = m  if m  is not None else self._sim(rr)
         h  = (self._t%1440)/60;  d = (self._t//1440)%7
-        # FIX: state already normalized — no /100 needed here
-        delta, self._prev_rr = np.clip((rr-self._prev_rr)/100,-1,1), rr
+        delta, self._prev_rr = np.clip((rr - self._prev_rr) / RR_NORM, -1, 1), rr
         return np.array([
-            np.clip(rr/100,0,1), delta,  # /100 matches FaaSEnv._state()
+            np.clip(rr / RR_NORM, 0, 1), delta,
             math.sin(2*math.pi*h/24), math.cos(2*math.pi*h/24),
             math.sin(2*math.pi*d/7),  math.cos(2*math.pi*d/7),
-            self._warm/MAX_WARM, m["cold_start_ratio"], np.clip(m["queue"]/50,0,1),
+            self._warm/MAX_WARM, m["cold_start_ratio"], np.clip(m["queue"] / QUEUE_NORM, 0, 1),
         ], dtype=np.float32)

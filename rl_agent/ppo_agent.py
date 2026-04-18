@@ -172,14 +172,33 @@ class PPOAgent:
         return action.item(), dist.log_prob(action).item(), value.item()
 
     def _get_valid_action_mask(self, current_reps: int, rr: float) -> torch.Tensor:
-        from environment import MIN_WARM, MAX_WARM
+        import math
+        from environment import MIN_WARM, MAX_WARM, PER_REPLICA_RPS
         valid = torch.ones(ACTION_DIM, dtype=torch.bool, device=self.device)
+
+        needed = max(MIN_WARM, math.ceil(rr / PER_REPLICA_RPS))
+        under_provisioned = current_reps < needed
+        very_idle = rr <= 1.0 and current_reps > MIN_WARM
+
         for i, delta in enumerate(ACTION_MAP):
             target = current_reps + delta
             if target < MIN_WARM or target > MAX_WARM:
                 valid[i] = False
-        # keep hold always valid
-        valid[2] = True
+
+        if under_provisioned:
+            # Force upward movement when under-provisioned.
+            valid[0] = False
+            valid[1] = False
+            valid[2] = False
+        elif very_idle:
+            # Force downward movement when clearly idle.
+            valid[2] = False
+            valid[3] = False
+            valid[4] = False
+
+        # keep hold as final fallback
+        if not bool(valid.any()):
+            valid[2] = True
         return valid
 
     def action_delta(self, action_idx: int) -> int:
