@@ -2,10 +2,9 @@
 
 This project trains a PPO agent to pre-warm OpenFaaS function replicas before cold starts hurt latency.
 
-It is built for:
-- **OpenFaaS CE limits** (replicas clamped to 1..5).
-- **Prometheus-first signals** (request rate, estimated queue, and latency when available).
-- **Repeatable load tests** with Locust case matrix runs.
+This is built for:
+- **OpenFaaS CE** (replicas clamped to 1..5).
+- **Load tests** with Locust case matrix runs.
 
 ## What this does.
 
@@ -104,19 +103,7 @@ This script:
 - `POST /save-metrics`: save metrics JSON and render chart.
 - `GET /download-chart?name=...`: download PNG from checkpoints.
 
-## Latency metric troubleshooting.
-
-If latency is missing, usually Prometheus does not expose the exact series name/label your query expects.
-
-Check:
-1. metric family name differs by OpenFaaS version.
-2. `function_name` label format differs (`figlet-fn` vs `figlet-fn.openfaas-fn`).
-3. gateway scrape target is missing.
-4. histogram buckets are not exported or were dropped.
-5. lookback window is too short for sparse traffic.
-
 ## Current practical notes.
 
-- This repo targets OpenFaaS CE scaling reality, not unlimited autoscaling.
-- Spike profiles above CE capacity will still show degraded quality.
+- This repo targets OpenFaaS CE scaling (ie: 1 to 5, not unlimited).
 - For fair policy comparisons, keep case inputs identical and learning disabled during benchmark sweeps.
