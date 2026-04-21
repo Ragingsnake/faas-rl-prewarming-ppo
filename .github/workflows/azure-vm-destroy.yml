@@ -1,0 +1,47 @@
+name: Azure VM Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      resource_group:
+        description: Resource group containing the benchmark VM
+        required: true
+        default: rg-faas-rl-benchmark-vm
+      vm_name:
+        description: VM name (used when not deleting the full resource group)
+        required: true
+        default: faas-rl-bench-vm
+      delete_resource_group:
+        description: Delete full resource group (recommended)
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    env:
+      RG: ${{ inputs.resource_group }}
+      VM_NAME: ${{ inputs.vm_name }}
+      DELETE_RG: ${{ inputs.delete_resource_group }}
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Destroy resources
+        run: |
+          if [ "$DELETE_RG" = "true" ]; then
+            az group delete --name "$RG" --yes --no-wait
+            echo "Deletion requested for resource group: $RG"
+          else
+            az vm delete --resource-group "$RG" --name "$VM_NAME" --yes
+            echo "VM deleted: $VM_NAME in $RG"
+          fi

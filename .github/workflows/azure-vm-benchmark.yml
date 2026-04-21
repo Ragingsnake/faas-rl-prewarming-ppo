@@ -1,0 +1,175 @@
+name: Azure VM Benchmark Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      resource_group:
+        description: Dedicated resource group for benchmark VM (must not be rg-faas-rl)
+        required: true
+        default: rg-faas-rl-benchmark-vm
+      vm_name:
+        description: VM name
+        required: true
+        default: faas-rl-bench-vm
+      location:
+        description: Azure region
+        required: true
+        default: eastus
+      vm_size:
+        description: VM size
+        required: true
+        default: Standard_D4s_v5
+      branch:
+        description: Branch to run on VM
+        required: true
+        default: main
+      stop_after:
+        description: Stop workflow after this phase
+        required: true
+        type: choice
+        options:
+          - startupOnLocal
+          - run_agent
+        default: run_agent
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  create-and-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      RG: ${{ inputs.resource_group }}
+      VM_NAME: ${{ inputs.vm_name }}
+      LOCATION: ${{ inputs.location }}
+      VM_SIZE: ${{ inputs.vm_size }}
+      BRANCH: ${{ inputs.branch }}
+      STOP_AFTER: ${{ inputs.stop_after }}
+      VM_USER: azureuser
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate dedicated resource group
+        run: |
+          if [ "$RG" = "rg-faas-rl" ]; then
+            echo "Use a dedicated VM resource group, not rg-faas-rl."
+            exit 1
+          fi
+
+      - name: Create resource group
+        run: az group create --name "$RG" --location "$LOCATION" --output none
+
+      - name: Generate ephemeral SSH key
+        run: ssh-keygen -t ed25519 -N "" -f "$RUNNER_TEMP/vm_key"
+
+      - name: Create VM
+        run: |
+          az vm create \
+            --resource-group "$RG" \
+            --name "$VM_NAME" \
+            --image Ubuntu2204 \
+            --size "$VM_SIZE" \
+            --admin-username "$VM_USER" \
+            --ssh-key-values "$RUNNER_TEMP/vm_key.pub" \
+            --public-ip-sku Standard \
+            --output none
+
+      - name: Open all inbound ports (testing only)
+        run: |
+          NIC_ID=$(az vm show --resource-group "$RG" --name "$VM_NAME" --query "networkProfile.networkInterfaces[0].id" -o tsv)
+          NSG_ID=$(az network nic show --ids "$NIC_ID" --query "networkSecurityGroup.id" -o tsv)
+          NSG_NAME=$(basename "$NSG_ID")
+          az network nsg rule create \
+            --resource-group "$RG" \
+            --nsg-name "$NSG_NAME" \
+            --name AllowAllInboundForTesting \
+            --priority 100 \
+            --direction Inbound \
+            --access Allow \
+            --protocol "*" \
+            --source-address-prefixes "*" \
+            --source-port-ranges "*" \
+            --destination-address-prefixes "*" \
+            --destination-port-ranges "*" \
+            --output none
+
+      - name: Resolve VM public IP
+        id: vmip
+        run: |
+          VM_IP=$(az vm show -d --resource-group "$RG" --name "$VM_NAME" --query publicIps -o tsv)
+          echo "ip=$VM_IP" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for SSH
+        run: |
+          for _ in {1..40}; do
+            if ssh -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$VM_USER@${{ steps.vmip.outputs.ip }}" "echo ok" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "VM did not become reachable over SSH in time."
+          exit 1
+
+      - name: Upload repository to VM
+        run: |
+          tar --exclude='.git' -czf "$RUNNER_TEMP/repo.tgz" .
+          scp -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$RUNNER_TEMP/repo.tgz" "$VM_USER@${{ steps.vmip.outputs.ip }}:~/repo.tgz"
+          ssh -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}" "rm -rf ~/faas-rl-prewarming-ppo && mkdir -p ~/faas-rl-prewarming-ppo && tar -xzf ~/repo.tgz -C ~/faas-rl-prewarming-ppo"
+
+      - name: Run startup/run_agent on VM
+        run: |
+          ssh -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}" <<'EOF'
+            set -euo pipefail
+            cd ~/faas-rl-prewarming-ppo
+
+            chmod +x startupOnLocal.sh
+            chmod +x rl_agent/run_agent.sh
+
+            bash startupOnLocal.sh > startupOnLocal.log 2>&1
+          EOF
+
+      - name: Start run_agent in background
+        if: ${{ env.STOP_AFTER == 'run_agent' }}
+        run: |
+          ssh -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}" <<'EOF'
+            set -euo pipefail
+            cd ~/faas-rl-prewarming-ppo/rl_agent
+            nohup bash run_agent.sh active > ../agent.log 2>&1 &
+          EOF
+
+      - name: Download benchmark artifacts
+        if: always()
+        run: |
+          mkdir -p artifacts
+          scp -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}:~/faas-rl-prewarming-ppo/startupOnLocal.log" artifacts/ 2>/dev/null || true
+          scp -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}:~/faas-rl-prewarming-ppo/agent.log" artifacts/ 2>/dev/null || true
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-vm-benchmark-artifacts
+          path: artifacts/
+          if-no-files-found: warn
+
+      - name: Print VM details
+        if: always()
+        run: |
+          echo "VM kept running for inspection:"
+          echo "Resource Group: $RG"
+          echo "VM Name: $VM_NAME"
+          echo "Stop after: $STOP_AFTER"
+          echo "Public IP: ${{ steps.vmip.outputs.ip }}"
+          echo "Use the Azure VM Destroy workflow when done."
