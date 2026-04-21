@@ -33,6 +33,7 @@ def plot_metrics(metrics: list, output_path: str = "chart.png", title: str = "Fa
     steps = [m["step"] for m in metrics]
     
     # Extract data with defaults for missing keys
+    req_rate = [m.get("req_rate", 0) for m in metrics]
     latency = [m.get("latency", 0) for m in metrics]
     cold_starts = [m.get("cold_starts", 0) for m in metrics]
     warm_hits = [m.get("warm_hits", 0) for m in metrics]
@@ -42,11 +43,16 @@ def plot_metrics(metrics: list, output_path: str = "chart.png", title: str = "Fa
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     fig.suptitle(title, fontsize=14, fontweight="bold")
     
-    # Top-left: Latency
-    axes[0, 0].plot(steps, latency, color="steelblue", linewidth=1.5)
-    axes[0, 0].set_title("Latency (seconds)", fontweight="bold")
+    # Top-left: Latency (fallback to RPS for older metrics files)
+    if any(v > 0 for v in latency):
+        axes[0, 0].plot(steps, latency, color="steelblue", linewidth=1.5)
+        axes[0, 0].set_title("Latency (seconds)", fontweight="bold")
+        axes[0, 0].set_ylabel("Seconds")
+    else:
+        axes[0, 0].plot(steps, req_rate, color="steelblue", linewidth=1.5)
+        axes[0, 0].set_title("Request Rate (RPS)", fontweight="bold")
+        axes[0, 0].set_ylabel("Requests/sec")
     axes[0, 0].set_xlabel("Time Step")
-    axes[0, 0].set_ylabel("Seconds")
     axes[0, 0].grid(True, alpha=0.3)
     
     # Top-right: Cold vs Warm

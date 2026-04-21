@@ -91,6 +91,7 @@ class FaaSEnv:
             "warm_containers": self._current_warm,
             "cold_starts": m["cold"], "warm_hits": m["warm"],
             "req_rate": m["rr"], "reward": r,
+            "latency": m["latency"],
             "queue": m["q"],
             "raw_delta": raw_delta,
             "applied_delta": applied_delta,
@@ -157,6 +158,16 @@ class FaaSEnv:
         
         # Query Prometheus using the fully qualified name (No fake queue metric!)
         rr = self._prom(f'rate(gateway_function_invocation_total{{function_name="{prom_fn}"}}[{dur}s])')
+        latency = self._prom_first([
+            # OpenFaaS gateway latency histogram (preferred)
+            f'histogram_quantile(0.95, sum(rate(gateway_functions_seconds_bucket{{function_name="{prom_fn}"}}[{dur}s])) by (le))',
+            f'histogram_quantile(0.95, sum(rate(gateway_functions_seconds_bucket{{function_name="{self.cfg.function_name}"}}[{dur}s])) by (le))',
+            f'histogram_quantile(0.95, sum(rate(gateway_function_invocation_seconds_bucket{{function_name="{prom_fn}"}}[{dur}s])) by (le))',
+            f'histogram_quantile(0.95, sum(rate(gateway_function_invocation_seconds_bucket{{function_name="{self.cfg.function_name}"}}[{dur}s])) by (le))',
+            # Fallback to average latency when histogram buckets are unavailable
+            f'sum(rate(gateway_functions_seconds_sum{{function_name="{prom_fn}"}}[{dur}s])) / clamp_min(sum(rate(gateway_functions_seconds_count{{function_name="{prom_fn}"}}[{dur}s])), 1e-9)',
+            f'sum(rate(gateway_functions_seconds_sum{{function_name="{self.cfg.function_name}"}}[{dur}s])) / clamp_min(sum(rate(gateway_functions_seconds_count{{function_name="{self.cfg.function_name}"}}[{dur}s])), 1e-9)',
+        ], default=0.0)
         
         # The OpenFaaS API still expects just the base name
         reps = self._get_replicas()
@@ -180,7 +191,7 @@ class FaaSEnv:
         idle = max(0, reps - max(1, int(rr / PER_REPLICA_RPS)))
 
         return dict(rr=rr, rdelta=rd, cold=cold_estimate, warm=warm_estimate,
-                    csr=cold_estimate/max(1, rr), q=q_estimate, idle=idle, reps=reps)
+                    csr=cold_estimate/max(1, rr), latency=latency, q=q_estimate, idle=idle, reps=reps)
 
     # def _scrape(self):
     #     fn, dur = self.cfg.function_name, self.cfg.step_seconds
@@ -204,6 +215,13 @@ class FaaSEnv:
             d = r.json()["data"]["result"]
             return float(d[0]["value"][1]) if d else default
         except: return default
+
+    def _prom_first(self, queries: list[str], default=0.0) -> float:
+        for q in queries:
+            v = self._prom(q, default=float("nan"))
+            if not math.isnan(v):
+                return v
+        return default
 
     def _get_replicas(self):
         try:
@@ -312,10 +330,13 @@ class SyntheticFaaSEnv:
         cold = int(self.rng.binomial(n, cold_p))
         warm = n - cold
         idle = max(0, self._warm - max(1, int(rr / PER_REPLICA_RPS)))
+        capacity = max(1.0, self._warm * PER_REPLICA_RPS)
+        queue = max(0.0, rr - capacity)
+        # Approximate queueing delay in seconds from overload ratio.
+        latency = queue / capacity if queue > 0.0 else 0.0
         return dict(cold_starts=cold, warm_hits=warm, idle_warm=idle,
                     cold_start_ratio=cold/max(1,n), containers=self._warm,
-                    # FIX: latency = queue backlog, not raw total_requests
-                    latency=max(0,n-self._warm), queue=max(0,n-self._warm),
+                    latency=latency, queue=queue,
                     # FIX: mem now reflects idle containers (was static 0.2)
                     mem=min(1.0, idle*self.BASE_MEM))
 

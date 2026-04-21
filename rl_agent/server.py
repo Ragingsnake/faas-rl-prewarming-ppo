@@ -60,6 +60,7 @@ _stats: dict = {
     "steps":         0,
     "total_reward":  0.0,
     "last_reward":   0.0,
+    "last_latency":  0.0,
     "last_loss":     0.0,
     "warm_containers": 0,
     "last_cold_starts": 0,
@@ -124,7 +125,8 @@ def _control_loop():
         
         log.info(
             f"Result -> Reps: {info.get('warm_containers')}, Traffic: {info.get('req_rate'):.1f} RPS, "
-            f"Queue: {info.get('queue', 0):.1f}, Applied Delta: {applied_delta}, Reward: {reward:.2f}"
+            f"Latency: {info.get('latency', 0.0):.3f}s, Queue: {info.get('queue', 0):.1f}, "
+            f"Applied Delta: {applied_delta}, Reward: {reward:.2f}"
         )
         # ── store ─────────────────────────────────────────────
         if agent_active:
@@ -153,6 +155,7 @@ def _control_loop():
             _stats["steps"]           += 1
             _stats["total_reward"]    += reward
             _stats["last_reward"]      = reward
+            _stats["last_latency"]     = info.get("latency", 0.0)
             _stats["last_loss"]        = last_losses.get("actor_loss", 0.0)
             _stats["warm_containers"]  = info.get("warm_containers", 0)
             _stats["last_cold_starts"] = info.get("cold_starts", 0)
@@ -164,12 +167,12 @@ def _control_loop():
             # Log to metrics file
             _metrics.log_step(
                 step=_stats["steps"],
-                latency=info.get("queue", 0),
+                latency=info.get("latency", 0.0),
+                req_rate=info.get("req_rate", 0.0),
                 cold_starts=info.get("cold_starts", 0),
                 warm_hits=info.get("warm_hits", 0),
                 queue=info.get("queue", 0),
                 warm_containers=info.get("warm_containers", 0),
-                req_rate=info.get("req_rate", 0.0),
                 reward=reward,
                 agent_active=agent_active,
             )
@@ -213,6 +216,9 @@ def metrics():
         "# HELP rl_agent_reward Last step reward",
         "# TYPE rl_agent_reward gauge",
         f'rl_agent_reward {s["last_reward"]:.4f}',
+        "# HELP rl_agent_latency_seconds Last step latency (seconds)",
+        "# TYPE rl_agent_latency_seconds gauge",
+        f'rl_agent_latency_seconds {s["last_latency"]:.6f}',
         "# HELP rl_agent_warm_containers Current pre-warmed containers",
         "# TYPE rl_agent_warm_containers gauge",
         f'rl_agent_warm_containers {s["warm_containers"]}',
