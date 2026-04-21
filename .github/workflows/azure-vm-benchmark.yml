@@ -57,6 +57,7 @@ jobs:
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
+          auth-type: OIDC
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -76,13 +77,16 @@ jobs:
 
       - name: Create VM
         run: |
-          az vm create \
+          PUB_KEY=$(tr -d '\r\n' < "$RUNNER_TEMP/vm_key.pub")
+          az vm create --only-show-errors \
             --resource-group "$RG" \
+            --location "$LOCATION" \
             --name "$VM_NAME" \
-            --image Ubuntu2204 \
+            --image Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest \
             --size "$VM_SIZE" \
             --admin-username "$VM_USER" \
-            --ssh-key-values "$RUNNER_TEMP/vm_key.pub" \
+            --authentication-type ssh \
+            --ssh-key-values "$PUB_KEY" \
             --public-ip-sku Standard \
             --output none
 
@@ -155,6 +159,9 @@ jobs:
           mkdir -p artifacts
           scp -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}:~/faas-rl-prewarming-ppo/startupOnLocal.log" artifacts/ 2>/dev/null || true
           scp -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}:~/faas-rl-prewarming-ppo/agent.log" artifacts/ 2>/dev/null || true
+          if [ -z "$(ls -A artifacts 2>/dev/null)" ]; then
+            echo "No VM artifacts collected (workflow likely failed before VM setup)." > artifacts/README.txt
+          fi
 
       - name: Upload benchmark artifacts
         if: always()
