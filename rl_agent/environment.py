@@ -63,7 +63,8 @@ class FaaSEnv:
     def step(self, action_idx: int):
         raw_delta = ACTION_MAP[action_idx]
         prev_reps = self._current_warm
-        delta = self._stabilize_delta(raw_delta, self._prev_req_rate, prev_reps)
+        #delta = self._stabilize_delta(raw_delta, self._prev_req_rate, prev_reps)
+        delta = raw_delta
         requested = prev_reps + delta
         target = int(np.clip(requested, MIN_WARM, MAX_WARM))
         applied_delta = target - prev_reps
