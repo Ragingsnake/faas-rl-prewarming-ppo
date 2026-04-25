@@ -113,6 +113,7 @@ def _control_loop():
             )
         else:
             action, log_prob, value = 2, 0.0, 0.0  # hold while inactive
+        
         raw_delta = _agent.action_delta(action)
         mode_text = "active" if agent_active else "inactive"
         log.info(

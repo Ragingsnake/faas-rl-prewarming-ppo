@@ -14,11 +14,11 @@ on:
       location:
         description: Azure region
         required: true
-        default: eastus
+        default: koreacentral
       vm_size:
         description: VM size
         required: true
-        default: Standard_D4s_v5
+        default: Standard_B2s
       branch:
         description: Branch to run on VM
         required: true
@@ -47,7 +47,8 @@ jobs:
       VM_SIZE: ${{ inputs.vm_size }}
       BRANCH: ${{ inputs.branch }}
       STOP_AFTER: ${{ inputs.stop_after }}
-      VM_USER: azureuser
+      VM_USER: trainer
+      VM_PASSWORD: ${{ secrets.AZURE_VM_ADMIN_PASSWORD }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -71,12 +72,41 @@ jobs:
       - name: Create resource group
         run: az group create --name "$RG" --location "$LOCATION" --output none
 
-      - name: Generate ephemeral SSH key
-        run: ssh-keygen -t ed25519 -N "" -f "$RUNNER_TEMP/vm_key"
+      - name: Validate VM password secret
+        run: |
+          if [ -z "${VM_PASSWORD:-}" ]; then
+            echo "Missing secret AZURE_VM_ADMIN_PASSWORD."
+            exit 1
+          fi
+
+      - name: Pre-check VM quota for requested size
+        run: |
+          set -euo pipefail
+          FAMILY=$(az vm list-skus --location "$LOCATION" --size "$VM_SIZE" --all --query "[?name=='$VM_SIZE'].family | [0]" -o tsv)
+          if [ -z "$FAMILY" ]; then
+            echo "VM size '$VM_SIZE' is not available in location '$LOCATION'."
+            exit 1
+          fi
+          VCPUS=$(az vm list-skus --location "$LOCATION" --size "$VM_SIZE" --all --query "[?name=='$VM_SIZE'].capabilities[?name=='vCPUs'].value | [0][0]" -o tsv)
+          if [ -z "$VCPUS" ]; then
+            echo "Could not resolve vCPU count for '$VM_SIZE' in '$LOCATION'."
+            exit 1
+          fi
+          LIMIT=$(az vm list-usage --location "$LOCATION" --query "[?name.value=='$FAMILY'].limit | [0]" -o tsv)
+          CURRENT=$(az vm list-usage --location "$LOCATION" --query "[?name.value=='$FAMILY'].currentValue | [0]" -o tsv)
+          if [ -z "$LIMIT" ] || [ -z "$CURRENT" ]; then
+            echo "Could not resolve quota usage for family '$FAMILY' in '$LOCATION'."
+            exit 1
+          fi
+          REQUIRED=$((CURRENT + VCPUS))
+          if [ "$REQUIRED" -gt "$LIMIT" ]; then
+            echo "Insufficient quota for family '$FAMILY' in '$LOCATION': limit=$LIMIT current=$CURRENT required_vcpus=$VCPUS."
+            echo "Use a different location/size or request quota increase in Azure."
+            exit 1
+          fi
 
       - name: Create VM
         run: |
-          PUB_KEY=$(tr -d '\r\n' < "$RUNNER_TEMP/vm_key.pub")
           az vm create --only-show-errors \
             --resource-group "$RG" \
             --location "$LOCATION" \
@@ -84,8 +114,8 @@ jobs:
             --image Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest \
             --size "$VM_SIZE" \
             --admin-username "$VM_USER" \
-            --authentication-type ssh \
-            --ssh-key-values "$PUB_KEY" \
+            --authentication-type password \
+            --admin-password "$VM_PASSWORD" \
             --public-ip-sku Standard \
             --output none
 
@@ -108,6 +138,11 @@ jobs:
             --destination-port-ranges "*" \
             --output none
 
+      - name: Install sshpass
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
       - name: Resolve VM public IP
         id: vmip
         run: |
@@ -117,7 +152,7 @@ jobs:
       - name: Wait for SSH
         run: |
           for _ in {1..40}; do
-            if ssh -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$VM_USER@${{ steps.vmip.outputs.ip }}" "echo ok" >/dev/null 2>&1; then
+            if sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$VM_USER@${{ steps.vmip.outputs.ip }}" "echo ok" >/dev/null 2>&1; then
               exit 0
             fi
             sleep 15
@@ -128,12 +163,12 @@ jobs:
       - name: Upload repository to VM
         run: |
           tar --exclude='.git' -czf "$RUNNER_TEMP/repo.tgz" .
-          scp -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$RUNNER_TEMP/repo.tgz" "$VM_USER@${{ steps.vmip.outputs.ip }}:~/repo.tgz"
-          ssh -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}" "rm -rf ~/faas-rl-prewarming-ppo && mkdir -p ~/faas-rl-prewarming-ppo && tar -xzf ~/repo.tgz -C ~/faas-rl-prewarming-ppo"
+          sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no "$RUNNER_TEMP/repo.tgz" "$VM_USER@${{ steps.vmip.outputs.ip }}:~/repo.tgz"
+          sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}" "rm -rf ~/faas-rl-prewarming-ppo && mkdir -p ~/faas-rl-prewarming-ppo && tar -xzf ~/repo.tgz -C ~/faas-rl-prewarming-ppo"
 
       - name: Run startup/run_agent on VM
         run: |
-          ssh -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}" <<'EOF'
+          sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}" <<'EOF'
             set -euo pipefail
             cd ~/faas-rl-prewarming-ppo
 
@@ -146,7 +181,7 @@ jobs:
       - name: Start run_agent in background
         if: ${{ env.STOP_AFTER == 'run_agent' }}
         run: |
-          ssh -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}" <<'EOF'
+          sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}" <<'EOF'
             set -euo pipefail
             cd ~/faas-rl-prewarming-ppo/rl_agent
             nohup bash run_agent.sh active > ../agent.log 2>&1 &
@@ -156,8 +191,8 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts
-          scp -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}:~/faas-rl-prewarming-ppo/startupOnLocal.log" artifacts/ 2>/dev/null || true
-          scp -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}:~/faas-rl-prewarming-ppo/agent.log" artifacts/ 2>/dev/null || true
+          sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}:~/faas-rl-prewarming-ppo/startupOnLocal.log" artifacts/ 2>/dev/null || true
+          sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no "$VM_USER@${{ steps.vmip.outputs.ip }}:~/faas-rl-prewarming-ppo/agent.log" artifacts/ 2>/dev/null || true
           if [ -z "$(ls -A artifacts 2>/dev/null)" ]; then
             echo "No VM artifacts collected (workflow likely failed before VM setup)." > artifacts/README.txt
           fi
