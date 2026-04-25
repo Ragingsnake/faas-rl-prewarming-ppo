@@ -1,0 +1,19 @@
+# Environments
+venv/
+venv*/
+env/
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Locust reports & results
+locust/results/
+*.html
+
+# Agent Checkpoints
+rl_agent/checkpoints/
