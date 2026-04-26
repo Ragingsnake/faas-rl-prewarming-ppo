@@ -176,6 +176,7 @@ def _control_loop():
                 warm_containers=info.get("warm_containers", 0),
                 reward=reward,
                 agent_active=agent_active,
+                idle_cost=max(0, info.get("warm_containers", 1) - max(1, int(info.get("req_rate", 0) / 15))),
             )
 
         # ── periodic checkpoint (only after at least one update) ──
@@ -302,7 +303,8 @@ def save_metrics(
     _metrics.save()
     import subprocess
     try:
-        cmd = ["python3", "visualize_metrics.py", "--input", METRICS_PATH, "--output", output, "--title", title]
+        import sys
+        cmd = [sys.executable, "visualize_metrics.py", "--input", METRICS_PATH, "--output", output, "--title", title]
         if start_step is not None:
             cmd += ["--start-step", str(start_step)]
         if end_step is not None:
