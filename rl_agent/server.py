@@ -302,7 +302,7 @@ def save_metrics(
     _metrics.save()
     import subprocess
     try:
-        cmd = ["python", "visualize_metrics.py", "--input", METRICS_PATH, "--output", output, "--title", title]
+        cmd = ["python3", "visualize_metrics.py", "--input", METRICS_PATH, "--output", output, "--title", title]
         if start_step is not None:
             cmd += ["--start-step", str(start_step)]
         if end_step is not None:

@@ -54,6 +54,7 @@ class FaaSEnv:
         self.cfg = cfg
         self._prev_req_rate = self._prev_cold = self._prev_warm = 0
         self._current_warm  = 1
+        self._last_latency  = 0.0  # Track latency to detect saturation
 
     def reset(self):
         self._prev_req_rate = self._prev_cold = self._prev_warm = 0
@@ -63,8 +64,8 @@ class FaaSEnv:
     def step(self, action_idx: int):
         raw_delta = ACTION_MAP[action_idx]
         prev_reps = self._current_warm
-        #delta = self._stabilize_delta(raw_delta, self._prev_req_rate, prev_reps)
-        delta = raw_delta
+        # Use latency-aware stabilizer instead of raw delta
+        delta = self._stabilize_delta(raw_delta, self._prev_req_rate, prev_reps)
         requested = prev_reps + delta
         target = int(np.clip(requested, MIN_WARM, MAX_WARM))
         applied_delta = target - prev_reps
@@ -77,6 +78,7 @@ class FaaSEnv:
         # _current_warm is now the ground-truth count from OpenFaaS,
         # so state and /status always match `faas-cli list`.
         self._current_warm = m["reps"]
+        self._last_latency  = m["latency"]  # track for next stabilize call
 
         # No action penalty when scaling down at zero traffic — encourages aggressive scale-down
         action_penalty = -0.1 if (delta != 0 and m["rr"] > 1.0) else 0.0
@@ -99,10 +101,19 @@ class FaaSEnv:
         }
 
     def _stabilize_delta(self, delta: int, rr: float, reps: int) -> int:
-        # Deterministic safety mode: when idle, always move toward 1 replica.
+        # LATENCY-AWARE SAFETY: Prometheus RPS is "blind" when system is saturated
+        # because it only counts completed requests. High latency = system is struggling
+        # even if measured RPS looks low. Override scale decisions with latency signal.
+        if self._last_latency > 2.0 and reps < MAX_WARM:
+            # Saturated! Force scale-up regardless of what RPS metric says
+            return 1
+        # Deterministic safety mode: when TRULY idle (low RPS AND low latency)
         if rr <= 5.0 and reps > MIN_WARM:
-            return -1
-        # Emergency safety mode: if heavily overloaded, force scale-up by 1.
+            if self._last_latency > 1.0:
+                # Still serving requests slowly — hold position, don't scale down
+                return 0
+            return -1  # Genuinely idle → scale down
+        # Emergency safety mode: if heavily overloaded by RPS metric
         if rr > reps * PER_REPLICA_RPS * 1.2 and reps < MAX_WARM:
             return 1
         if delta == 0:
@@ -173,18 +184,29 @@ class FaaSEnv:
         # The OpenFaaS API still expects just the base name
         reps = self._get_replicas()
 
-        # 2. Mathematical Cold/Warm/Queue Estimation
-        # 1 replica handles ~PER_REPLICA_RPS smoothly. Overflow is penalized.
+        # 2. Cold/Warm/Queue Estimation (latency-aware)
+        # Standard capacity model: 1 replica handles ~PER_REPLICA_RPS smoothly.
         capacity = max(1, reps) * PER_REPLICA_RPS
         
         if rr > capacity:
+            # RPS metric shows clear overflow
             cold_estimate = rr - capacity
             warm_estimate = capacity
-            q_estimate = rr - capacity  # The overflow IS the backlog queue
+            q_estimate = rr - capacity
+        elif latency > 2.0:
+            # SATURATION DETECTED via latency even though RPS looks low.
+            # This happens because Prometheus only counts COMPLETED requests.
+            # When system is saturated, requests queue up and latency spikes,
+            # but measured RPS drops (completing slowly) — a measurement blind spot.
+            # Estimate queue depth from latency: queue ≈ latency × capacity
+            # (Little's Law: L = λ × W, where W=latency, λ=capacity)
+            q_estimate = min(capacity, latency * reps)  # bounded by capacity
+            cold_estimate = q_estimate * 0.5  # assume 50% cold when saturated
+            warm_estimate = max(0, rr - cold_estimate)
         else:
             cold_estimate = 0.0
             warm_estimate = rr
-            q_estimate = 0.0            # No overflow, no queue
+            q_estimate = 0.0
 
         # 3. Calculate deltas
         rd = rr - self._prev_req_rate
@@ -192,7 +214,7 @@ class FaaSEnv:
         idle = max(0, reps - max(1, int(rr / PER_REPLICA_RPS)))
 
         return dict(rr=rr, rdelta=rd, cold=cold_estimate, warm=warm_estimate,
-                    csr=cold_estimate/max(1, rr), latency=latency, q=q_estimate, idle=idle, reps=reps)
+                    csr=cold_estimate/max(1, rr+cold_estimate), latency=latency, q=q_estimate, idle=idle, reps=reps)
 
     # def _scrape(self):
     #     fn, dur = self.cfg.function_name, self.cfg.step_seconds
