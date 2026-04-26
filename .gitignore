@@ -1,19 +1,9 @@
-# Environments
-venv/
-venv*/
-env/
-.env
-
-# Python
+﻿locust/venv/
+rl_agent/venv/
 __pycache__/
 *.pyc
-
-# Logs
-*.log
-
-# Locust reports & results
-locust/results/
-*.html
-
-# Agent Checkpoints
+gateway.log
+prometheus.log
 rl_agent/checkpoints/
+locust/results/
+locust/report_*.html
